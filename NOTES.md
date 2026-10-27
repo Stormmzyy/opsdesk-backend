@@ -205,3 +205,27 @@ The contract's User object carries `phone`, `address { street, suite, city, zipc
 `GET /users` returns empty strings for all of them. The contract permits that: it's the same rule it uses for a newly registered user ("fields the register form doesn't collect come back as empty strings"). Nothing is invented. If the Users page looks broken with blanks, the likely fix is the frontend not rendering an empty address block, not the backend making data up.
 
 **The real question is whether these fields belong in the contract at all.** That's a v1.1 decision, not this week's: keep them and add real storage and a way to fill them in, or remove them from the User shape.
+
+### 16. Two simultaneous edits to the same ticket can silently overwrite each other
+
+`TicketService.updateTicket` isn't transactional, and `Ticket` has no `@Version` field. An update reads the ticket, changes the fields that were sent, and saves the whole ticket back. If two people edit the same ticket at the same time, both read the same starting version, and **the second write wins: the first person's change is silently lost.** Neither of them gets an error. This is the classic **lost update** problem.
+
+For example, one person moves ticket 3 to `RESOLVED` while another changes its title. Both read the ticket as `OPEN` with the old title, and whichever saves second writes back its own copy, undoing the other's change.
+
+**Noted, not fixed.** The two standard fixes are:
+- **Optimistic locking:** a `@Version` field on `Ticket`. Every save checks that the version hasn't changed since the ticket was read, and the second writer gets a conflict instead of overwriting. The contract's `CONFLICT` code (409) would fit, but the contract currently defines it narrowly ("registering an email that's already taken"), so that description would need widening first.
+- **A transaction with the right isolation level** around the read and the write, so the database itself refuses or serialises the clash.
+
+**When it matters:** as soon as more than one person uses the system. Today it's one developer and 12 sample tickets.
+
+### 17. The HTTP layer and the repository have no automated tests
+
+The only tests are `contextLoads`, which proves the app starts, and the two `TicketServiceTest` unit tests, which test the service with a mocked repository. There are **no controller tests and no repository tests.**
+
+Everything about the HTTP layer was proven **by hand with curl**: every status code, every error body (`{ error, message, fields }`), the field messages, the 404-before-400 check order (decision 6), and the pagination edge rules. Nothing automated protects any of it. **A change to `GlobalExceptionHandler` could break the contract's error shape, and every test would still pass.** The same goes for the repository: a broken query, or a sort that's been dropped (decision 7), would go unnoticed.
+
+Spring's tools for this are already on the classpath, through the per-feature test starters Initializr added on day one:
+- **`@WebMvcTest`** starts only the web layer (controllers, the exception handler, JSON and validation), with the service mocked, and checks real requests and responses through `MockMvc`. In Boot 4 it's `org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest`; in Boot 3 it was `org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest`.
+- **`@DataJpaTest`** starts only JPA and the repositories, against a real database, to check queries such as `findByStatus` and the paged, sorted search. In Boot 4 it's `org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest`; in Boot 3 it was `org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest`.
+
+**Noted, not fixed.** The curl checks recorded in each PR are the specification these tests should encode, starting with the error shape and the check order, because those are the easiest to break without noticing.
