@@ -1,10 +1,9 @@
 package com.opsdesk.backend.ticket;
 
-import java.util.List;
-
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.ModelAttribute;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -75,13 +74,28 @@ public class TicketController {
     // entity itself, so the JSON is always exactly the contract's six fields.
     // (NOTES.md, decisions 4 and 8.)
 
-    // GET /api/v1/tickets -> 200 with a JSON array. An empty list is still a
-    // 200 with [], not a 404: "there are no tickets" is a valid answer.
+    // GET /api/v1/tickets -> 200. Two shapes, chosen by the query string:
+    //   - none of page, size, status or search sent: the plain v1 JSON array
+    //     of every ticket. An empty list is still a 200 with [], not a 404.
+    //   - any of them sent: the contract's paginated envelope (TicketPage).
+    // The return type is Object because the two answers have different
+    // shapes; Jackson writes whichever one is returned.
+    //
+    // @ModelAttribute builds TicketListParams from the query string, and
+    // @Valid checks it. A bad page, size or status never reaches this method:
+    // GlobalExceptionHandler answers VALIDATION_ERROR naming the parameter.
     @GetMapping
-    public List<TicketResponse> listTickets() {
-        return ticketService.listTickets().stream()
-                .map(TicketResponse::from)
-                .toList();
+    public Object listTickets(@Valid @ModelAttribute TicketListParams params) {
+        if (!params.anySent()) {
+            return ticketService.listTickets().stream()
+                    .map(TicketResponse::from)
+                    .toList();
+        }
+        long page = params.pageNumber();
+        int size = params.pageSize();
+        return TicketPage.from(
+                ticketService.findTickets(page, size, params.statusValue(), params.searchText()),
+                page, size);
     }
 
     // GET /api/v1/tickets/{id} -> 200, or 404 via GlobalExceptionHandler.

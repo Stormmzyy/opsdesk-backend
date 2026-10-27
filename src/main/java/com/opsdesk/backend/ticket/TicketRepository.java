@@ -3,6 +3,7 @@ package com.opsdesk.backend.ticket;
 import java.util.List;
 
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 
 // Why there's no implementation: Spring Data writes it.
 //
@@ -28,7 +29,11 @@ import org.springframework.data.jpa.repository.JpaRepository;
 // Yesterday's List, id counter and synchronized blocks are gone. PostgreSQL
 // now does all three jobs: it stores the rows, a sequence hands out ids, and
 // transactions keep concurrent requests from corrupting each other.
-public interface TicketRepository extends JpaRepository<Ticket, Long> {
+//
+// JpaSpecificationExecutor adds findAll(Specification, Pageable) and
+// count(Specification): queries whose WHERE clause is built at runtime from
+// optional parts, used by GET /tickets with filters (see TicketSpecifications).
+public interface TicketRepository extends JpaRepository<Ticket, Long>, JpaSpecificationExecutor<Ticket> {
 
     // A derived query: no SQL and no implementation, just a method name.
     //

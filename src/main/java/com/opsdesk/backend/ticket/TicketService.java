@@ -2,7 +2,12 @@ package com.opsdesk.backend.ticket;
 
 import java.util.List;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 
 // @Service marks this class as the business-logic layer. Like @Repository, it
@@ -37,6 +42,34 @@ public class TicketService {
     // returns rows in whatever order they sit on disk. (NOTES.md, decision 7.)
     public List<Ticket> listTickets() {
         return ticketRepository.findAll(Sort.by("id"));
+    }
+
+    // One page of tickets, optionally filtered by status and search text.
+    // page is 1-based, as the contract counts; status and search may be null.
+    public Page<Ticket> findTickets(long page, int size, TicketStatus status, String search) {
+        Specification<Ticket> filters = TicketSpecifications.matching(status, search);
+
+        // A page so far out that its first row would be past row 2,147,483,647
+        // can't be asked for: Hibernate's offset is an int, and the request
+        // would crash with a 500. No table here is that big, so the page is
+        // certainly past the last one. The contract says that's a 200 with no
+        // items and the real totals, so answer exactly that with a count.
+        if (page - 1 > Integer.MAX_VALUE / size) {
+            return new PageImpl<>(List.of(), Pageable.unpaged(), ticketRepository.count(filters));
+        }
+
+        // The off-by-one: the contract's pages start at 1 ("page=1" is the
+        // first page), but Spring's PageRequest starts at 0. So page 1 is
+        // Spring's page 0, hence page - 1. Without it, ?page=1 would silently
+        // return the second page, and the first ten tickets could never be
+        // fetched.
+        //
+        // Sort.by("id") goes into the paged query itself (NOTES.md, decision
+        // 7). Without an ORDER BY, PostgreSQL may return rows in a different
+        // order for each query, so page 1 and page 2 could overlap or skip
+        // tickets, and an update could move a ticket from one page to another.
+        Pageable pageable = PageRequest.of((int) (page - 1), size, Sort.by("id"));
+        return ticketRepository.findAll(filters, pageable);
     }
 
     // orElseThrow turns "no such ticket" into an exception right here, so every
