@@ -2,6 +2,7 @@ package com.opsdesk.backend.ticket;
 
 import java.util.List;
 
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
 // @Service marks this class as the business-logic layer. Like @Repository, it
@@ -31,8 +32,11 @@ public class TicketService {
         this.ticketRepository = ticketRepository;
     }
 
+    // The contract says the list is sorted by id, so the service asks for that
+    // order explicitly. A plain findAll() has no ORDER BY, and PostgreSQL then
+    // returns rows in whatever order they sit on disk. (NOTES.md, decision 7.)
     public List<Ticket> listTickets() {
-        return ticketRepository.findAll();
+        return ticketRepository.findAll(Sort.by("id"));
     }
 
     // orElseThrow turns "no such ticket" into an exception right here, so every
