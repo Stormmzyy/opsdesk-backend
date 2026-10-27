@@ -1,1 +1,9 @@
-spring.application.name=opsdesk-backend
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5433/opsdesk
+    username: ${DB_USER:opsdesk}
+    password: ${DB_PASSWORD:opsdesk}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
