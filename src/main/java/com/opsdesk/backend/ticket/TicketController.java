@@ -17,6 +17,8 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.opsdesk.backend.error.ApiError;
 
+import jakarta.validation.Valid;
+
 // @RestController does two jobs:
 //   1. Like @Service, it tells Spring to create one TicketController at startup.
 //      Spring MVC then reads its methods and registers each one as the handler
@@ -100,18 +102,23 @@ public class TicketController {
     // contract says a successful create is 201.
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    public TicketResponse createTicket(@RequestBody CreateTicketRequest request) {
+    // @Valid: after Jackson has built the CreateTicketRequest (and its
+    // constructor has trimmed it), Spring runs every constraint on it. If any
+    // fail, the method never runs and Spring throws
+    // MethodArgumentNotValidException with every failing field.
+    public TicketResponse createTicket(@Valid @RequestBody CreateTicketRequest request) {
         return TicketResponse.from(ticketService.createTicket(
-                request.title(), request.description(), request.priority(), request.team()));
+                request.titleText(), request.descriptionText(), request.priorityValue(), request.teamValue()));
     }
 
     // PATCH /api/v1/tickets/{id} -> 200 with the whole updated ticket.
     // PATCH, not PUT, because the client sends only the fields it wants to
     // change; PUT would mean "replace the whole ticket with this body".
     @PatchMapping("/{id}")
-    public TicketResponse updateTicket(@PathVariable String id, @RequestBody UpdateTicketRequest request) {
+    public TicketResponse updateTicket(@PathVariable String id, @Valid @RequestBody UpdateTicketRequest request) {
         return TicketResponse.from(ticketService.updateTicket(parseId(id),
-                request.title(), request.description(), request.priority(), request.status(), request.team()));
+                request.titleText(), request.descriptionText(), request.priorityValue(),
+                request.statusValue(), request.teamValue()));
     }
 
     // DELETE /api/v1/tickets/{id} -> 204 No Content. A void method with 204
