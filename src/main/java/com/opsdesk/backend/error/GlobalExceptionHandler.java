@@ -59,8 +59,9 @@ public class GlobalExceptionHandler {
     }
 
     // 404: no ticket has that id, or the id isn't a valid id at all.
-    @ExceptionHandler(TicketNotFoundException.class)
-    public ResponseEntity<ApiError> handleTicketNotFound(TicketNotFoundException exception) {
+    // NotFoundException covers every resource: tickets and projects.
+    @ExceptionHandler(NotFoundException.class)
+    public ResponseEntity<ApiError> handleNotFound(NotFoundException exception) {
         return respond(HttpStatus.NOT_FOUND, ApiError.notFound(exception.getMessage()));
     }
 
@@ -115,7 +116,7 @@ public class GlobalExceptionHandler {
             ticketService.getTicket(TicketIds.parse(matcher.group(1)));
             return Optional.empty();
         } catch (TicketNotFoundException missing) {
-            return Optional.of(handleTicketNotFound(missing));
+            return Optional.of(handleNotFound(missing));
         }
     }
 
