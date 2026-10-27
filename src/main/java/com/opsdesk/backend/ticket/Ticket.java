@@ -1,21 +1,75 @@
 package com.opsdesk.backend.ticket;
 
-// A plain class with setters rather than a record, because tomorrow this
-// becomes a JPA entity, and JPA needs to create an empty object and fill in
-// its fields one at a time. A record can't be changed after it's created.
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+
+// @Entity: Hibernate maps this class to a table (named "ticket", from the
+// class name) and each Ticket object to one row in it.
+//
+// A plain class with setters rather than a record, because Hibernate creates
+// an empty object and then fills in its fields one at a time when it reads a
+// row. A record can't be changed after it's created.
+@Entity
 public class Ticket {
 
-    // Long (the object), not long (the primitive), so a ticket that hasn't
-    // been saved yet can have no id at all: null means "the repository hasn't
-    // given this one an id yet".
+    // @GeneratedValue(IDENTITY): PostgreSQL picks the id when the row is
+    // inserted, from a sequence that only goes up. That replaces yesterday's
+    // nextId counter and keeps the same promise: an id is never reused, even
+    // after a delete. (NOTES.md, decision 1.)
+    //
+    // Long (the object), not long, so a ticket that hasn't been saved yet can
+    // have no id at all. Spring Data treats a null id as "new, so INSERT it"
+    // and a non-null id as "already exists, so UPDATE it".
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
+
+    // nullable = false puts NOT NULL on the column, so the database itself
+    // refuses a ticket without a title, even if a bug lets one past the code.
+    @Column(nullable = false)
     private String title;
+
+    // TEXT rather than the default VARCHAR(255): the contract sets no maximum
+    // length on a description, and the samples are already over 120
+    // characters. A long description would otherwise fail to save.
+    @Column(nullable = false, columnDefinition = "text")
     private String description;
+
+    // EnumType.STRING stores the constant's name ("URGENT") in the column.
+    //
+    // The default, EnumType.ORDINAL, would store its position in the enum
+    // instead: LOW = 0, MEDIUM = 1, HIGH = 2, URGENT = 3. Two things go wrong:
+    //   1. The data is unreadable. In psql, "priority = 3" means nothing
+    //      without the Java source open next to it.
+    //   2. Reordering the enum silently corrupts every existing row. Add a
+    //      CRITICAL between HIGH and URGENT, and URGENT becomes 4. Every row
+    //      that stored 3 now reads back as CRITICAL. Nothing fails; the data
+    //      is just wrong.
+    // STRING only breaks if a constant is renamed, and then it fails loudly
+    // on read instead of quietly returning the wrong value.
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
     private Priority priority;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
     private TicketStatus status;
+
+    // Stores ENGINEERING, not "Engineering". @JsonValue only changes the JSON;
+    // in the database, EnumType.STRING always uses the constant's name.
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
     private Team team;
 
-    public Ticket() {
+    // Hibernate needs a no-argument constructor to create the empty object it
+    // fills from a row. Protected, not public, so application code uses the
+    // full constructor below and can't create a half-empty ticket by accident.
+    protected Ticket() {
     }
 
     public Ticket(String title, String description, Priority priority, TicketStatus status, Team team) {
