@@ -197,3 +197,11 @@ The contract caps `size` at 100 but puts no upper limit on `page`, so any whole 
 No real client can send such a number: JavaScript can't represent an integer above 2⁵³ exactly, so the frontend could never produce one or read one back correctly.
 
 **Noted, not fixed.** Rejecting it would mean adding a maximum to `page`, which is a contract change. A v1.1 would probably cap `page` the way `size` is capped.
+
+### 15. The User shape's `phone`, `address` and `company` have no source in OpsDesk
+
+The contract's User object carries `phone`, `address { street, suite, city, zipcode }` and `company { name }`. They were inherited from JSONPlaceholder, the public API the frontend's Users page read from while there was no backend. OpsDesk has no source for any of them: `AppUser` stores only `name`, `username` and `email`, and the frontend's `employees.ts` has no phone, street or company to seed from.
+
+`GET /users` returns empty strings for all of them. The contract permits that: it's the same rule it uses for a newly registered user ("fields the register form doesn't collect come back as empty strings"). Nothing is invented. If the Users page looks broken with blanks, the likely fix is the frontend not rendering an empty address block, not the backend making data up.
+
+**The real question is whether these fields belong in the contract at all.** That's a v1.1 decision, not this week's: keep them and add real storage and a way to fill them in, or remove them from the User shape.
