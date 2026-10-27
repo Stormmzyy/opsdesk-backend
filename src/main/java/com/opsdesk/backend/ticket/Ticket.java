@@ -1,12 +1,18 @@
 package com.opsdesk.backend.ticket;
 
+import com.opsdesk.backend.project.Project;
+import com.opsdesk.backend.user.AppUser;
+
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
+import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
 
 // @Entity: Hibernate maps this class to a table (named "ticket", from the
 // class name) and each Ticket object to one row in it.
@@ -65,6 +71,33 @@ public class Ticket {
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private Team team;
+
+    // Many tickets belong to one project. In the database this is a
+    // project_id column on the ticket table, with a foreign key to
+    // project(id), so it can only hold the id of a project that exists.
+    // Optional: none of the frontend's tickets has a project.
+    //
+    // FetchType.LAZY: loading a ticket doesn't load its project. Hibernate puts
+    // a stand-in object (a proxy) here instead, and only runs a query for the
+    // project if something reads one of its fields.
+    //
+    // EAGER (the default for @ManyToOne) would load the project every time a
+    // ticket is loaded, whether anyone needs it or not. GET /tickets would then
+    // run 1 query for the tickets plus up to 1 more per ticket for its project
+    // (the "N+1 queries" problem), and the same again for the assignee, just to
+    // return six fields that use neither. EAGER also can't be switched off for
+    // one query, while LAZY can be switched on for one query when a page really
+    // needs the project.
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "project_id")
+    private Project project;
+
+    // The person working on the ticket: many tickets can be assigned to one
+    // user. An assignee_id column with a foreign key to app_user(id). Optional,
+    // because a new ticket has no assignee. LAZY for the same reasons as above.
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "assignee_id")
+    private AppUser assignee;
 
     // Hibernate needs a no-argument constructor to create the empty object it
     // fills from a row. Protected, not public, so application code uses the
@@ -126,5 +159,21 @@ public class Ticket {
 
     public void setTeam(Team team) {
         this.team = team;
+    }
+
+    public Project getProject() {
+        return project;
+    }
+
+    public void setProject(Project project) {
+        this.project = project;
+    }
+
+    public AppUser getAssignee() {
+        return assignee;
+    }
+
+    public void setAssignee(AppUser assignee) {
+        this.assignee = assignee;
     }
 }
