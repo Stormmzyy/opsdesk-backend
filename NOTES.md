@@ -124,6 +124,10 @@ That's good protection, because the database refuses a bad value even if a bug g
 
 The real fix is a migration tool such as **Flyway**: versioned SQL scripts that change the schema on purpose, including altering this constraint. `ddl-auto: update` is a development convenience. It isn't something to run against a production database.
 
+**Thursday: the first time this limitation actually bit.** The contract sets no maximum title length, but `title` was created as `varchar(255)`. A 300-character title passed validation, then failed in PostgreSQL (`value too long for type character varying(255)`), and the API answered 500. Adding `columnDefinition = "text"` to the entity fixes fresh databases. But `ddl-auto: update` won't change the type of a column that already exists, so the dev database needed a hand-run `ALTER TABLE ticket ALTER COLUMN title TYPE text;`. Anyone else's existing database needs the same command, and nothing will tell them. In a real project, this is exactly a Flyway migration (`V2__ticket_title_text.sql`): written once, committed, and applied automatically to every database, including production.
+
+**A design point for v1.1, not for now.** An unbounded title is questionable API design. Real APIs normally set a maximum length on every free-text field, to bound storage, keep lists readable, and limit abuse. That needs a contract change: a maximum in the Ticket table, a new validation message, and the frontend's form enforcing the same limit. Until then, `text` matches the contract as written.
+
 **2. Constraint names are Hibernate's hashes, and they show up in error messages.**
 
 The foreign keys and unique constraints have generated names such as `fkon3g4edms44nvfti4skwns3vn` and `uk1j9d9a06i600gd43uu3km82jw`. PostgreSQL puts the name in its error messages exactly as it is: a duplicate email fails with "violates unique constraint uk1j9d9a06i600gd43uu3km82jw". They can be given readable names through `@JoinColumn(foreignKey = @ForeignKey(name = ...))` and `@Table(uniqueConstraints = @UniqueConstraint(name = ..., columnNames = ...))`.
@@ -138,16 +142,58 @@ PostgreSQL creates an index for every primary key and unique constraint, but **n
 
 Revisit in **Week 7**, when filtering and pagination are done properly.
 
-## Open decisions
+### 10. Request fields are `Object`, not enums or `String`
 
-### Pagination on `GET /tickets` (planned for Thursday, not built yet)
+`CreateTicketRequest` and `UpdateTicketRequest` declare every field as `Object`, and two custom constraints (`@TextField` and `@OneOf`) check them. The usual choices each break part of the contract:
 
-The contract says `GET /tickets` returns a plain array, and describes pagination (`page`, `size`, `status`, `search`) as planned for v1.1 and not implemented. The Week 6 deliverable needs `page`, `size` and a `status` filter that return the contract's paginated envelope:
+- **An enum field** (`Priority priority`): `"priority": "SUPER"` fails inside Jackson while it's still reading the body. The client gets an unspecific `BAD_REQUEST`, instead of the contract's `VALIDATION_ERROR` naming the `priority` field.
+- **A `String` field** (`String title`): Jackson quietly turns `"title": 123` into `"123"`. That's a valid 3-character title, so it passes, when the contract says it must fail with `"Title must be text."` An object or array sent as the title makes Jackson fail outright, again with no field-level message.
+- **One message per field.** The contract's `fields` object holds exactly one message per field. The standard `@NotBlank` plus `@Size(min = 3)` would give an empty title *two* messages, in no guaranteed order. The custom constraints check in a fixed order (missing, not text, empty, too short) and stop at the first problem.
+
+With `Object` fields, Jackson accepts whatever JSON type arrives, and validation decides what's wrong and says which field.
+
+**The cost.** The request records aren't strongly typed: `title` is an `Object`, not a `String`. So each record carries small conversion methods (`titleText()`, `priorityValue()`, `teamValue()` and so on) that cast and convert after validation has passed. Type safety arrives one step later than usual: at the controller, after `@Valid`, rather than when Jackson reads the body. The allowed values in each `@OneOf` also repeat the enum constants, because an annotation can't ask an enum for its values. If they drift apart, the new value is rejected (it fails safe).
+
+Trimming happens in each record's compact constructor, so validation only ever sees the trimmed value, and the value validated is the value saved. `priority`, `status` and `team` are deliberately not trimmed: the contract says `" Support "` is invalid.
+
+### 11. A `PATCH` with `"title": null` is treated as if `title` were left out
+
+In `UpdateTicketRequest`, a field that wasn't sent arrives as `null`, and `null` means "leave this field alone". A field explicitly sent as `null` also arrives as `null`, so the two can't be told apart. `{"title": null}` changes nothing and returns 200, when arguably it should be rejected as `"Title must be text."`
+
+Telling "sent as null" apart from "not sent" needs a different way of reading the body: reading it as a raw JSON tree, or a wrapper type that records whether a field was present at all.
+
+**Not fixed.** The frontend never sends `null` for a field; it leaves the field out.
+
+### 12. An unsupported method returns 404, not HTTP's 405
+
+A request using a method the endpoint doesn't support, such as `PUT /api/v1/tickets/1`, answers **404 `NOT_FOUND`** ("Nothing exists at PUT /api/v1/tickets/1."). HTTP's usual answer would be **405 Method Not Allowed**.
+
+The contract's error code list says it's complete ("The backend must not invent others without updating this document"), and it has no 405 and no code to go with one. Returning 405 would mean inventing a status and a code the frontend doesn't know about. Treating "no endpoint for this method and path" as "a path that doesn't exist" keeps every response inside the contract.
+
+**The cost.** A developer who calls the wrong verb sees "not found" for a resource that does exist, which can send them looking for the wrong problem. If that becomes a real annoyance, the fix is a contract change adding `METHOD_NOT_ALLOWED` with 405, not a quiet change in the backend.
+
+The same reasoning sends a body that isn't sent as JSON (Spring's 415 Unsupported Media Type) to 400 `BAD_REQUEST`: the body can't be read as a JSON object, which is exactly the contract's definition.
+
+### 13. Pagination on `GET /tickets`: the backend has it, the frontend doesn't use it yet (decided Thursday)
+
+**The backend implements `page`, `size`, `status` and `search`** and returns the contract's envelope:
 
 ```json
 { "items": [], "page": 1, "size": 10, "totalItems": 0, "totalPages": 0 }
 ```
 
-The plan is to build the envelope on Thursday and, in the same piece of work, update `API_CONTRACT.md` and the frontend's `getTickets` query to match.
+The contract's section on this moved from "Planned for v1.1" into v1, labelled SPECIFIED (the backend must build it, but the frontend doesn't call it yet). Every rule and message stayed exactly as written, including `search`, so the section moved unchanged. The contract change went through its own PR in `opsdesk-frontend` (branch `docs/contract-pagination-v1`).
 
-Worth deciding first: the contract's v1.1 design says the plain array stays the answer when **none** of the query parameters is sent, and the envelope is returned only when at least one is. Keeping that rule means the frontend doesn't have to change at the same moment the backend does.
+**No parameters still returns the plain array.** That's the contract's own rule: the envelope is returned only when at least one of `page`, `size`, `status` or `search` is sent. It's why the frontend needs no change. Its `getTickets` query still sends no parameters and still gets the array it expects.
+
+**The frontend keeps filtering, searching and paging in the browser**, as it does now. The Tickets page could move to server-side pages, but the Dashboard and Teams pages need *every* ticket to count correctly (tickets per status, open tickets per team). Moving them to a paged endpoint would mean either fetching every page or adding count endpoints. Neither is worth it this week.
+
+**Deferred on purpose, not forgotten.** Week 7 covers pagination and filtering done properly. At 12 tickets, fetching everything is the right call. At 500 it wouldn't be.
+
+### 14. A page number too large for a `long` is accepted, and the response echoes `Long.MAX_VALUE`
+
+The contract caps `size` at 100 but puts no upper limit on `page`, so any whole number of 1 or more is a valid page. `?page=99999999999999999999` is therefore accepted, and it's past the last page, so it gets a 200 with `"items": []` and the real totals. But the number doesn't fit in a Java `long`, so the backend caps it, and the response echoes `"page": 9223372036854775807` (`Long.MAX_VALUE`) rather than the value that was sent.
+
+No real client can send such a number: JavaScript can't represent an integer above 2⁵³ exactly, so the frontend could never produce one or read one back correctly.
+
+**Noted, not fixed.** Rejecting it would mean adding a maximum to `page`, which is a contract change. A v1.1 would probably cap `page` the way `size` is capped.
