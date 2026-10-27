@@ -25,4 +25,15 @@ public enum Team {
     public String getLabel() {
         return label;
     }
+
+    // The reverse of getLabel: "Engineering" -> ENGINEERING. Exact match only,
+    // because the contract says team values aren't trimmed or case-folded.
+    public static Team fromLabel(String label) {
+        for (Team team : values()) {
+            if (team.label.equals(label)) {
+                return team;
+            }
+        }
+        throw new IllegalArgumentException("Unknown team: " + label);
+    }
 }

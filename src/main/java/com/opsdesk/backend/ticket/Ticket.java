@@ -37,7 +37,11 @@ public class Ticket {
 
     // nullable = false puts NOT NULL on the column, so the database itself
     // refuses a ticket without a title, even if a bug lets one past the code.
-    @Column(nullable = false)
+    //
+    // TEXT, not the default VARCHAR(255): the contract sets no maximum title
+    // length, so a 300-character title is valid and passed validation, then
+    // failed in PostgreSQL with a 500. (NOTES.md, decision 9.)
+    @Column(nullable = false, columnDefinition = "text")
     private String title;
 
     // TEXT rather than the default VARCHAR(255): the contract sets no maximum

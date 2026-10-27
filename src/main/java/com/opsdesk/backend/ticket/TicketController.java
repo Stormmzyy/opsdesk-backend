@@ -1,12 +1,9 @@
 package com.opsdesk.backend.ticket;
 
-import java.util.List;
-import java.util.regex.Pattern;
-
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.DeleteMapping;
-import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.ModelAttribute;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -15,7 +12,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
-import com.opsdesk.backend.error.ApiError;
+import jakarta.validation.Valid;
 
 // @RestController does two jobs:
 //   1. Like @Service, it tells Spring to create one TicketController at startup.
@@ -77,21 +74,36 @@ public class TicketController {
     // entity itself, so the JSON is always exactly the contract's six fields.
     // (NOTES.md, decisions 4 and 8.)
 
-    // GET /api/v1/tickets -> 200 with a JSON array. An empty list is still a
-    // 200 with [], not a 404: "there are no tickets" is a valid answer.
+    // GET /api/v1/tickets -> 200. Two shapes, chosen by the query string:
+    //   - none of page, size, status or search sent: the plain v1 JSON array
+    //     of every ticket. An empty list is still a 200 with [], not a 404.
+    //   - any of them sent: the contract's paginated envelope (TicketPage).
+    // The return type is Object because the two answers have different
+    // shapes; Jackson writes whichever one is returned.
+    //
+    // @ModelAttribute builds TicketListParams from the query string, and
+    // @Valid checks it. A bad page, size or status never reaches this method:
+    // GlobalExceptionHandler answers VALIDATION_ERROR naming the parameter.
     @GetMapping
-    public List<TicketResponse> listTickets() {
-        return ticketService.listTickets().stream()
-                .map(TicketResponse::from)
-                .toList();
+    public Object listTickets(@Valid @ModelAttribute TicketListParams params) {
+        if (!params.anySent()) {
+            return ticketService.listTickets().stream()
+                    .map(TicketResponse::from)
+                    .toList();
+        }
+        long page = params.pageNumber();
+        int size = params.pageSize();
+        return TicketPage.from(
+                ticketService.findTickets(page, size, params.statusValue(), params.searchText()),
+                page, size);
     }
 
-    // GET /api/v1/tickets/{id} -> 200, or 404 via the handler at the bottom.
+    // GET /api/v1/tickets/{id} -> 200, or 404 via GlobalExceptionHandler.
     // @PathVariable copies the {id} part of the URL into the id parameter as
-    // text; parseId (below) decides whether it's a valid id.
+    // text; TicketIds.parse decides whether it's a valid id.
     @GetMapping("/{id}")
     public TicketResponse getTicket(@PathVariable String id) {
-        return TicketResponse.from(ticketService.getTicket(parseId(id)));
+        return TicketResponse.from(ticketService.getTicket(TicketIds.parse(id)));
     }
 
     // POST /api/v1/tickets -> 201 Created with the new ticket.
@@ -100,18 +112,23 @@ public class TicketController {
     // contract says a successful create is 201.
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    public TicketResponse createTicket(@RequestBody CreateTicketRequest request) {
+    // @Valid: after Jackson has built the CreateTicketRequest (and its
+    // constructor has trimmed it), Spring runs every constraint on it. If any
+    // fail, the method never runs and Spring throws
+    // MethodArgumentNotValidException with every failing field.
+    public TicketResponse createTicket(@Valid @RequestBody CreateTicketRequest request) {
         return TicketResponse.from(ticketService.createTicket(
-                request.title(), request.description(), request.priority(), request.team()));
+                request.titleText(), request.descriptionText(), request.priorityValue(), request.teamValue()));
     }
 
     // PATCH /api/v1/tickets/{id} -> 200 with the whole updated ticket.
     // PATCH, not PUT, because the client sends only the fields it wants to
     // change; PUT would mean "replace the whole ticket with this body".
     @PatchMapping("/{id}")
-    public TicketResponse updateTicket(@PathVariable String id, @RequestBody UpdateTicketRequest request) {
-        return TicketResponse.from(ticketService.updateTicket(parseId(id),
-                request.title(), request.description(), request.priority(), request.status(), request.team()));
+    public TicketResponse updateTicket(@PathVariable String id, @Valid @RequestBody UpdateTicketRequest request) {
+        return TicketResponse.from(ticketService.updateTicket(TicketIds.parse(id),
+                request.titleText(), request.descriptionText(), request.priorityValue(),
+                request.statusValue(), request.teamValue()));
     }
 
     // DELETE /api/v1/tickets/{id} -> 204 No Content. A void method with 204
@@ -119,47 +136,10 @@ public class TicketController {
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void deleteTicket(@PathVariable String id) {
-        ticketService.deleteTicket(parseId(id));
+        ticketService.deleteTicket(TicketIds.parse(id));
     }
 
-    // Digits only: no sign, no decimal point, no spaces, no hex.
-    private static final Pattern WHOLE_NUMBER = Pattern.compile("^\\d+$");
-
-    // Turns the {id} text from the URL into a Long, or answers 404.
-    //
-    // Why the id arrives as a String instead of letting Spring convert it to a
-    // Long: Spring's conversion is more forgiving than the contract. It accepts
-    // "+3" and "0x3" (hexadecimal) and quietly returns ticket 3, and "-1"
-    // becomes a real Long. The contract says an id that isn't a positive whole
-    // number is treated like one that doesn't exist: 404.
-    //
-    // The regex is the same one the frontend uses in
-    // opsdesk-frontend/src/utils/parseId.ts, so the backend and the frontend
-    // agree exactly on which ids are valid. "abc", "3.5", "-1", "+3" and "0x3"
-    // are all rejected by both, and the 404 message quotes the id exactly as
-    // it appeared in the URL.
-    private static Long parseId(String rawId) {
-        if (!WHOLE_NUMBER.matcher(rawId).matches()) {
-            throw new TicketNotFoundException(rawId);
-        }
-        try {
-            return Long.parseLong(rawId);
-        } catch (NumberFormatException tooBig) {
-            // Digits only, but too many to fit in a Long
-            // (over 9,223,372,036,854,775,807). No ticket can have that id.
-            throw new TicketNotFoundException(rawId);
-        }
-    }
-
-    // Error handler. It only catches exceptions thrown by this controller's
-    // methods. On Thursday it moves into a global exception handler, which
-    // covers every controller.
-
-    // No ticket has that id, or the id wasn't a valid id at all -> 404 with
-    // the contract's error body.
-    @ExceptionHandler(TicketNotFoundException.class)
-    @ResponseStatus(HttpStatus.NOT_FOUND)
-    public ApiError handleTicketNotFound(TicketNotFoundException exception) {
-        return new ApiError("NOT_FOUND", exception.getMessage());
-    }
+    // No error handlers here any more. Every error, from this controller or
+    // from Spring before it, is turned into the contract's error body by
+    // com.opsdesk.backend.error.GlobalExceptionHandler.
 }
