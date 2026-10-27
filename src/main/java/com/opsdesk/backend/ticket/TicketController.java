@@ -73,22 +73,25 @@ public class TicketController {
     // path and body, calls the service, and says which status code to send.
     // The rules live in the service.
     //
-    // Note: these methods return the Ticket model directly. On Thursday they
-    // return a response DTO instead (see NOTES.md, decision 4).
+    // Every ticket leaves through TicketResponse.from, never as the Ticket
+    // entity itself, so the JSON is always exactly the contract's six fields.
+    // (NOTES.md, decisions 4 and 8.)
 
     // GET /api/v1/tickets -> 200 with a JSON array. An empty list is still a
     // 200 with [], not a 404: "there are no tickets" is a valid answer.
     @GetMapping
-    public List<Ticket> listTickets() {
-        return ticketService.listTickets();
+    public List<TicketResponse> listTickets() {
+        return ticketService.listTickets().stream()
+                .map(TicketResponse::from)
+                .toList();
     }
 
     // GET /api/v1/tickets/{id} -> 200, or 404 via the handler at the bottom.
     // @PathVariable copies the {id} part of the URL into the id parameter as
     // text; parseId (below) decides whether it's a valid id.
     @GetMapping("/{id}")
-    public Ticket getTicket(@PathVariable String id) {
-        return ticketService.getTicket(parseId(id));
+    public TicketResponse getTicket(@PathVariable String id) {
+        return TicketResponse.from(ticketService.getTicket(parseId(id)));
     }
 
     // POST /api/v1/tickets -> 201 Created with the new ticket.
@@ -97,18 +100,18 @@ public class TicketController {
     // contract says a successful create is 201.
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    public Ticket createTicket(@RequestBody CreateTicketRequest request) {
-        return ticketService.createTicket(
-                request.title(), request.description(), request.priority(), request.team());
+    public TicketResponse createTicket(@RequestBody CreateTicketRequest request) {
+        return TicketResponse.from(ticketService.createTicket(
+                request.title(), request.description(), request.priority(), request.team()));
     }
 
     // PATCH /api/v1/tickets/{id} -> 200 with the whole updated ticket.
     // PATCH, not PUT, because the client sends only the fields it wants to
     // change; PUT would mean "replace the whole ticket with this body".
     @PatchMapping("/{id}")
-    public Ticket updateTicket(@PathVariable String id, @RequestBody UpdateTicketRequest request) {
-        return ticketService.updateTicket(parseId(id),
-                request.title(), request.description(), request.priority(), request.status(), request.team());
+    public TicketResponse updateTicket(@PathVariable String id, @RequestBody UpdateTicketRequest request) {
+        return TicketResponse.from(ticketService.updateTicket(parseId(id),
+                request.title(), request.description(), request.priority(), request.status(), request.team()));
     }
 
     // DELETE /api/v1/tickets/{id} -> 204 No Content. A void method with 204
