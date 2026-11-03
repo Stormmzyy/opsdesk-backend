@@ -46,7 +46,7 @@ Hibernate creates and updates the tables automatically when the app starts (`ddl
 >
 > A database created fresh from today's code already has the right type. To start completely from scratch instead, remove the container (`docker rm -f opsdesk-db`, which deletes all its data) and run the `docker run` command above again.
 
-> **If your database was created before Tuesday of Week 7, recreate it.** Week 7 adds required columns: `password_hash` and `role` to `app_user`, and `created_by` to `ticket`. `ddl-auto: update` can't add a required column to a table that already has rows, so it logs a warning and the app starts anyway. Then every user endpoint (register, login, `GET /users`) answers 500, while the rest looks fine (see [NOTES.md](NOTES.md), decision 25). Everything in the database is sample data, so recreating it loses nothing:
+> **If your database was created before Tuesday of Week 7, recreate it.** Week 7 adds required columns: `password_hash` and `role` to `app_user`, and `created_by_id` to `ticket`. `ddl-auto: update` can't add a required column to a table that already has rows, so it logs a warning and the app starts anyway. Then every user endpoint (register, login, `GET /users`) answers 500, while the rest looks fine (see [NOTES.md](NOTES.md), decision 25). Everything in the database is sample data, so recreating it loses nothing:
 >
 > ```sh
 > docker rm -f opsdesk-db
@@ -54,6 +54,23 @@ Hibernate creates and updates the tables automatically when the app starts (`ddl
 > ```
 >
 > Then start the app, and the seeder fills the new database. This also covers the `ALTER TABLE` above, because a fresh database already has the right `title` type.
+
+### Development password: for the seeded development database only
+
+**`devpassword123` is a development value.** It is the password of all six seeded users, and it only exists in the seeded development database that the app creates on your machine. It is not a real password and must never be used anywhere else.
+
+It's there so you can log in locally as any role:
+
+| Email | Role |
+| --- | --- |
+| `priya.sharma@opsdesk.com` | ADMIN |
+| `kwame.asante@opsdesk.com` | MANAGER |
+| `daniel.mensah@opsdesk.com` | AGENT |
+| `liam.carter@opsdesk.com` | AGENT |
+| `marco.silva@opsdesk.com` | AGENT |
+| `fatima.bello@opsdesk.com` | USER |
+
+The database never holds the password itself. The seeder hashes it through the app's `PasswordEncoder` (BCrypt), like any other password, so each user's `password_hash` is a different BCrypt hash starting with `$2a$`. Which user owns and is assigned which seeded ticket is laid out in [NOTES.md](NOTES.md), decision 27.
 
 ### Making a user an admin
 
