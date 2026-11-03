@@ -6,7 +6,6 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Sort;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -55,7 +54,7 @@ public class TicketService {
     // findVisible is the only list query it has, and it takes the caller
     // (TicketQueriesImpl).
     public List<Ticket> listTickets(AppUser actor) {
-        return ticketRepository.findVisible(actor, TicketFilters.NONE, Sort.by("id"));
+        return ticketRepository.findVisible(actor, TicketFilters.NONE, TicketOrder.DEFAULT);
     }
 
     // One page of tickets, filtered by any of status, priority, team and
@@ -66,7 +65,8 @@ public class TicketService {
     // TicketQueriesImpl starts every WHERE clause from her visibility, so it's
     // in both the page query and the count query, and a USER's totalItems and
     // totalPages count only her own tickets.
-    public Page<Ticket> findTickets(long page, int size, TicketFilters filters, AppUser actor) {
+    public Page<Ticket> findTickets(long page, int size, TicketFilters filters, TicketOrder order,
+                                    AppUser actor) {
         // A page so far out that its first row would be past row 2,147,483,647
         // can't be asked for: Hibernate's offset is an int, and the request
         // would crash with a 500. No table here is that big, so the page is
@@ -82,12 +82,13 @@ public class TicketService {
         // return the second page, and the first ten tickets could never be
         // fetched.
         //
-        // Sort.by("id") goes into the paged query itself (NOTES.md, decision
-        // 7). Without an ORDER BY, PostgreSQL may return rows in a different
-        // order for each query, so page 1 and page 2 could overlap or skip
-        // tickets, and an update could move a ticket from one page to another.
-        Pageable pageable = PageRequest.of((int) (page - 1), size, Sort.by("id"));
-        return ticketRepository.findVisible(actor, filters, pageable);
+        // The order goes into the paged query itself, always ending with id
+        // as the tiebreaker (NOTES.md, decision 7). Without a total order,
+        // PostgreSQL may return rows in a different order for each query, so
+        // page 1 and page 2 could overlap or skip tickets. The page request
+        // carries no Sort: the order is the TicketOrder, and only that.
+        Pageable pageable = PageRequest.of((int) (page - 1), size);
+        return ticketRepository.findVisible(actor, filters, order, pageable);
     }
 
     // orElseThrow turns "no such ticket" into an exception right here, so every

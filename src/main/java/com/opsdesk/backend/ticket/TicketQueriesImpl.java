@@ -1,9 +1,11 @@
 package com.opsdesk.backend.ticket;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
@@ -14,6 +16,8 @@ import com.opsdesk.backend.user.AppUser;
 import com.opsdesk.backend.user.Role;
 
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.criteria.Expression;
+import jakarta.persistence.criteria.Order;
 
 // The one place a ticket list query is built and run (NOTES.md, the
 // filtering decision).
@@ -63,16 +67,25 @@ class TicketQueriesImpl implements TicketQueries {
 
     // readOnly, like SimpleJpaRepository's own read methods: one read-only
     // transaction around the page query and its count.
+    // The order goes in through the Specification (orderedBy, below), not as
+    // a Spring Data Sort, so Sort.unsorted() and an unsorted page request are
+    // passed on purpose. SimpleJpaRepository only replaces the ORDER BY when
+    // it's given a Sort that is sorted, so the one set by orderedBy stands.
+    // For the COUNT behind a page's totals, it clears any ORDER BY a
+    // Specification set, so the count is unaffected.
     @Override
     @Transactional(readOnly = true)
-    public List<Ticket> findVisible(AppUser actor, TicketFilters filters, Sort sort) {
-        return executor.findAll(where(actor, filters), sort);
+    public List<Ticket> findVisible(AppUser actor, TicketFilters filters, TicketOrder order) {
+        return executor.findAll(where(actor, filters).and(orderedBy(order)), Sort.unsorted());
     }
 
     @Override
     @Transactional(readOnly = true)
-    public Page<Ticket> findVisible(AppUser actor, TicketFilters filters, Pageable pageable) {
-        return executor.findAll(where(actor, filters), pageable);
+    public Page<Ticket> findVisible(AppUser actor, TicketFilters filters, TicketOrder order, Pageable pageable) {
+        // Only the number and size are kept: a Sort that arrived inside the
+        // Pageable would otherwise override orderedBy's ORDER BY.
+        Pageable unsorted = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize());
+        return executor.findAll(where(actor, filters).and(orderedBy(order)), unsorted);
     }
 
     @Override
@@ -136,7 +149,49 @@ class TicketQueriesImpl implements TicketQueries {
         return (root, query, cb) -> cb.equal(root.get("team"), team);
     }
 
+    // The ORDER BY for a TicketOrder, then id ascending as the tiebreaker
+    // (NOTES.md, the sorting decision). Each field maps to a fixed
+    // expression; nothing from the request becomes a property path.
+    //
+    // A Specification that only orders: it sets the query's ORDER BY and
+    // returns no condition (null, which and() leaves out of the WHERE).
+    private static Specification<Ticket> orderedBy(TicketOrder order) {
+        return (root, query, cb) -> {
+            Expression<?> key = switch (order.field()) {
+                case ID -> root.get("id");
+                case TITLE -> cb.lower(root.get("title"));
+                case STATUS -> cb.selectCase()
+                        .when(cb.equal(root.get("status"), TicketStatus.OPEN), 0)
+                        .when(cb.equal(root.get("status"), TicketStatus.IN_PROGRESS), 1)
+                        .when(cb.equal(root.get("status"), TicketStatus.RESOLVED), 2)
+                        .otherwise(3);
+                case PRIORITY -> cb.selectCase()
+                        .when(cb.equal(root.get("priority"), Priority.LOW), 0)
+                        .when(cb.equal(root.get("priority"), Priority.MEDIUM), 1)
+                        .when(cb.equal(root.get("priority"), Priority.HIGH), 2)
+                        .otherwise(3);
+                case TEAM -> root.get("team");
+            };
+            List<Order> orders = new ArrayList<>();
+            orders.add(order.descending() ? cb.desc(key) : cb.asc(key));
+            if (order.field() != TicketOrder.Field.ID) {
+                orders.add(cb.asc(root.get("id")));
+            }
+            query.orderBy(orders);
+            return null;
+        };
+    }
+
     // The contract: title OR description contains the text, ignoring case.
+    //
+    // CLOSED LIST: search covers title and description, and nothing else
+    // (NOTES.md, the filtering decision). Both appear in every response the
+    // caller gets for these tickets, and the search only ever runs inside
+    // her visible rows. Adding a field she can't read in a response (a
+    // creator's email, a password hash, an internal note) would make search
+    // an oracle: the row count would reveal whether a value exists without
+    // the value ever being shown. Any field added here must already be in
+    // the response for the same tickets.
     // (The caller has already trimmed it.) Both sides are lower-cased, so
     // "PRINTER" finds "Printer on the second floor".
     //

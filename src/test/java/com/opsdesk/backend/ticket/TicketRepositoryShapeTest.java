@@ -10,6 +10,7 @@ import java.util.Set;
 import java.util.stream.Stream;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 
 import com.opsdesk.backend.user.AppUser;
@@ -40,6 +41,13 @@ class TicketRepositoryShapeTest {
             List<Class<?>> parameters = Arrays.asList(method.getParameterTypes());
             if (parameters.stream().anyMatch(Specification.class::isAssignableFrom)) {
                 problems.add(method + " takes a Specification, so it can run a WHERE clause without visibility");
+            }
+            // A Sort is a list of property paths, and Spring Data follows
+            // them through associations. The order must come from
+            // TicketOrder's closed list instead (NOTES.md, the sorting
+            // decision).
+            if (parameters.contains(Sort.class)) {
+                problems.add(method + " takes a Sort, so the client could order by any property path");
             }
             if (returnsManyTickets(method)
                     && !RETURNS_ONLY_WHAT_IT_WAS_GIVEN.contains(method.getName())

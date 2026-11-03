@@ -3,6 +3,7 @@ package com.opsdesk.backend.ticket;
 import java.math.BigInteger;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import com.opsdesk.backend.validation.OneOf;
@@ -16,8 +17,8 @@ import com.opsdesk.backend.validation.WholeNumber;
 // the client gets a VALIDATION_ERROR with the parameter's name as the key in
 // "fields", using the contract's messages.
 //
-// Every field is a String, and null means "not sent". Any other query
-// parameter has no field here, so it's ignored, as the contract says.
+// Every field is a String, and null means "not sent". A query parameter with
+// no field here is refused by TicketController (see below).
 //
 // The four edge cases (NOTES.md, the filtering decision):
 //   - an unknown value (status=BANANA, team=Marketing): 400, the same
@@ -25,9 +26,10 @@ import com.opsdesk.backend.validation.WholeNumber;
 //     counts, so status=open is refused, and team takes its label
 //     ("Operations"), as everywhere on the wire. A dropped bad value would
 //     quietly become "no filter" and return MORE than the client asked for.
-//   - an unknown parameter (?stauts=OPEN): ignored, as the contract says.
-//     Visibility never depends on a parameter, so a typo can widen the
-//     filter but never who sees what.
+//   - an unknown parameter (?stauts=OPEN): 400, checked in TicketController.
+//     Ignoring it returned every visible ticket, a superset that looks
+//     exactly like a correct answer, and the client can't detect it. (Unknown
+//     BODY fields stay ignored: a dropped write can be seen by reading back.)
 //   - a parameter sent twice: 400 "... can only be sent once.", checked in
 //     TicketController before these checks run. Spring would otherwise join
 //     the values with a comma: search=printer&search=laptop silently
@@ -62,7 +64,27 @@ public record TicketListParams(
         String team,
 
         // Any text is a valid search, so there's nothing to check.
-        String search) {
+        String search,
+
+        // A closed list, spelled out (NOTES.md, the sorting decision): one
+        // field, then optionally ",asc" or ",desc", lowercase like every other
+        // fixed value. Anything else is a 400, never ignored:
+        //   - ignoring an unknown field would answer in an order the client
+        //     didn't ask for, and any order looks plausible, so a client
+        //     paging through "by priority" would never notice it isn't;
+        //   - the whitelist is the security boundary. The text never reaches
+        //     the query (TicketOrder.Field does), so a path such as
+        //     createdBy.passwordHash can't be expressed, let alone ordered by.
+        // One field only. A second sort is already "sent twice"; multi-field
+        // sorting is a feature nobody needs yet, and refusing keeps it addable.
+        @OneOf(required = false, values = {
+                "id", "id,asc", "id,desc",
+                "title", "title,asc", "title,desc",
+                "status", "status,asc", "status,desc",
+                "priority", "priority,asc", "priority,desc",
+                "team", "team,asc", "team,desc"},
+                message = "Sort must be id, title, status, priority or team, optionally followed by ,asc or ,desc.")
+        String sort) {
 
     private static final int DEFAULT_SIZE = 10;
 
@@ -79,6 +101,7 @@ public record TicketListParams(
         labels.put("priority", "Priority");
         labels.put("team", "Team");
         labels.put("search", "Search");
+        labels.put("sort", "Sort");
         return Collections.unmodifiableMap(labels);
     }
 
@@ -87,7 +110,19 @@ public record TicketListParams(
     // them, even "?page=1", asks for the paged envelope.
     boolean anySent() {
         return page != null || size != null || status != null || priority != null
-                || team != null || search != null;
+                || team != null || search != null || sort != null;
+    }
+
+    // The order, as data for TicketService. Only call after @Valid passed,
+    // which guarantees the text is one of the fifteen spellings above.
+    TicketOrder order() {
+        if (sort == null) {
+            return TicketOrder.DEFAULT;
+        }
+        String[] parts = sort.split(",");
+        TicketOrder.Field field = TicketOrder.Field.valueOf(parts[0].toUpperCase(Locale.ROOT));
+        boolean descending = parts.length == 2 && parts[1].equals("desc");
+        return new TicketOrder(field, descending);
     }
 
     // The filters, as data for TicketService. Only call after @Valid passed.
