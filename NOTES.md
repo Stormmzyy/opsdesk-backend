@@ -521,6 +521,39 @@ So if Kwame moves #4 to IN_PROGRESS between Fatima's read and her save, her titl
 - **`@DynamicUpdate` alone.** The detached merge copies the stale status onto the fresh row, so status still counts as changed and is still written. It only works together with the transactional load-and-modify, where "changed" means "changed by this request".
 - **Either of those without `@Version`.** They stop an unchanged column being overwritten, but not two people changing the *same* column. `@Version` catches that.
 
+**Accepted tradeoff: `@Version` conflicts on the row, not the column.** There is one version number for the whole ticket, and every UPDATE checks it, whichever columns it writes. So two requests that touch *different* columns of the same ticket still conflict. If Daniel moves #1, which is assigned to him, to IN_PROGRESS at the same moment as Kwame reassigns it, whichever commits second gets a **409**, even though `@DynamicUpdate` means the two UPDATEs would never have overwritten each other. `TicketLostUpdateTest` shows exactly this: a title-only write is refused because someone else changed the status.
+
+This is deliberate:
+- **The cost** is a false conflict on a rare race between two people working the same ticket. The loser reloads and tries again.
+- **The alternative is worse.** A per-column check (Hibernate's `OptimisticLockType.DIRTY`) would let those two through, but it would also let through changes that are only safe *together*. For example, an assign decided on the basis of a status that has since moved on. It also only works with `@DynamicUpdate` on every write, and it's much harder to reason about than one number per row.
+
+If false 409s ever show up in the WARN log often enough to matter, revisit it then, with the log as evidence.
+
+**Implemented on Thursday.** `Ticket` has `@Version` and `@DynamicUpdate`. `updateTicket` and `assignTicket` are `@Transactional`, so the ticket stays managed from load to commit. A stale write answers **409 `CONFLICT`** with a fixed message, and the detail is logged at WARN, like the 403.
+
+Measured with SQL logging. Fatima's title-only PATCH on #4:
+- Before: `update ticket set assignee_id=?, created_by_id=?, description=?, priority=?, project_id=?, status=?, team=?, title=? where id=?`
+- After: `update ticket set title=?,version=? where id=? and version=?`
+
+SELECTs per request:
+
+| Request | Before | After | What went |
+| --- | --- | --- | --- |
+| `PATCH /tickets/{id}` | 4 | 3 | the merge's re-read of the ticket |
+| `PATCH /tickets/{id}/assignee` | 5 | 4 | the merge's re-read |
+| `DELETE /tickets/{id}/assignee` | 4 | 3 | the merge's re-read |
+
+What's left for PATCH: the caller (by email), the ticket in the interceptor, and the ticket in the service. Assign adds the assignee by id. The interceptor's read is outside the service's transaction, so the ticket is read twice. That's harmless: the service re-checks `canEdit` and `canAssign` on its own copy, so a change between the two reads is judged against what the service is about to write. The permission walk passed 55 of 55 and 20 of 20 on a fresh database after the change.
+
+The assign path was already safe once `@Version` existed: merge compares the detached copy's version with the row's and throws. `@Transactional` there was for consistency and the query count.
+
+**The race test needs the dev PostgreSQL.** `TicketLostUpdateTest` runs against the dev PostgreSQL on port 5433, in a throwaway `lost_update_test` schema that it creates and drops. `./mvnw test` already needed that database for `contextLoads`, so the dependency isn't new, but it's now a real test rather than a smoke test. It is the test **most likely to resist Friday's H2 profile**, because what it proves is about real transactions:
+- two connections at once (`REQUIRES_NEW`)
+- one transaction's commit being visible to another that's already open
+- the schema properties it sets
+
+An in-memory H2 may lock, isolate or create schemas differently. This hasn't been tried. If it won't run on H2, keep it on PostgreSQL (or Testcontainers) rather than weaken it until it passes.
+
 ### 39. Decided now for Thursday: `assigneeId` on the ticket shape is readable on output and refused on input
 
 **The problem.** Thursday adds `assigneeId` to the ticket shape, because today no response can show who a ticket is assigned to (decision 27's assign cells could only be proved from the row). The obvious way to add a field is to read and write it everywhere. **If `assigneeId` binds on `PATCH /tickets/{id}`, it bypasses the assign endpoint and its ADMIN-or-MANAGER gate.** An AGENT may edit a ticket assigned to them, so they could send `{"assigneeId": <own id>}` on any ticket they're allowed to edit, or move one of theirs to someone else. Nothing would refuse it, because the edit rules don't know the field means assigning.
@@ -536,6 +569,33 @@ So if Kwame moves #4 to IN_PROGRESS between Fatima's read and her save, her titl
 - The same AGENT sends `{"assigneeId": <their own id>}` on a ticket assigned to nobody. They get **403**: they can't edit that ticket at all, and the interceptor refuses before the body is read (decision 33). The row's `assignee_id` is still NULL.
 
 Together these cover both ways the field could be abused: handing off a ticket they hold, and claiming one they were never given.
+
+### 40. `@Version` only catches simultaneous writes. A stale edit form can still silently overwrite the same field
+
+**What the guard compares.** `@Version` compares the version the **server** loaded with the row's version at the moment of writing. The server loads the ticket fresh at the start of each request, microseconds before it writes. So the guard fires only on **true simultaneity**: two requests whose load-to-commit windows overlap. That's what decision 38 closed, and what `TicketLostUpdateTest` proves.
+
+**The case it doesn't catch: a stale form.**
+1. Fatima opens #4's edit form.
+2. Kwame changes the ticket and saves.
+3. Minutes later, Fatima saves.
+
+Her request loads the ticket *after* Kwame's commit, so the server sees no conflict:
+- **If they changed different fields, nothing is lost.** `@DynamicUpdate` writes only the fields her request changes.
+
+  The frontend's Edit page sends the whole form. But a field she left alone carries the value she *saw*, which is now old. If that differs from Kwame's new value, it counts as a change and is written. So "different fields" holds for API clients that send only what they changed. For the full-form Edit page, any field Kwame changed comes back as her stale copy. For a USER, status, priority and team are refused instead of written (decision 34, "present and different"), so what's exposed is title and description.
+- **If they changed the same field, hers overwrites his silently, with no 409.** The server never saw a conflict.
+
+**What we can claim.** Concurrent requests can't lose each other's writes. Nothing stops a client from saving on top of a version it never saw.
+
+**The fix, and why we're not making it now.** The client would have to send back the version it read: an `If-Match` header with an ETag, or a `version` field in the PATCH body. The server then compares *that* with the row instead of its own fresh load, and answers 409 when they differ. It's the right fix, but it's a contract change. It would need:
+- `version` (or an ETag) on every ticket response
+- a rule for requests that omit it
+- the frontend storing it and sending it back on every edit and assign
+- a "someone changed this, reload" screen
+
+That's a round of contract and frontend work. And the case it closes matters most on **title and description**, where a silent overwrite is annoying (someone retypes a sentence) rather than dangerous.
+
+**Revisit it** when an edit form is likely to stay open long enough for this to bite in practice, or when a field arrives whose silent overwrite would be dangerous.
 
 ### Comments in `AppUser` that this week makes wrong
 
