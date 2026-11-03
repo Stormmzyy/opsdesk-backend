@@ -1,10 +1,12 @@
 package com.opsdesk.backend.validation;
 
+import java.nio.charset.StandardCharsets;
+
 import jakarta.validation.ConstraintValidator;
 import jakarta.validation.ConstraintValidatorContext;
 
 // The checks behind @TextField, in the order the contract's messages imply:
-// missing, then not text, then empty, then too short. It reports only the
+// missing, then not text, then empty, then too short, then too long. It reports only the
 // first problem it finds, so each field gets one message.
 public class TextFieldValidator implements ConstraintValidator<TextField, Object> {
 
@@ -13,11 +15,15 @@ public class TextFieldValidator implements ConstraintValidator<TextField, Object
     private String requiredMessage;
     private String tooShortMessage;
     private String notTextMessage;
+    private int maxUtf8Bytes;
+    private String tooLongMessage;
 
     @Override
     public void initialize(TextField annotation) {
         required = annotation.required();
         minLength = annotation.minLength();
+        maxUtf8Bytes = annotation.maxUtf8Bytes();
+        tooLongMessage = annotation.tooLongMessage();
         requiredMessage = annotation.requiredMessage();
         tooShortMessage = annotation.tooShortMessage();
         notTextMessage = annotation.notTextMessage();
@@ -40,6 +46,13 @@ public class TextFieldValidator implements ConstraintValidator<TextField, Object
         // the backend and the frontend's form agree on what "3 characters" is.
         if (text.length() < minLength) {
             return fail(context, tooShortMessage);
+        }
+        // Bytes, not characters: "é" is one character but two bytes, and an
+        // emoji is four. Only checked when a limit is set, so other fields
+        // don't pay for encoding the string.
+        if (maxUtf8Bytes != Integer.MAX_VALUE
+                && text.getBytes(StandardCharsets.UTF_8).length > maxUtf8Bytes) {
+            return fail(context, tooLongMessage);
         }
         return true;
     }

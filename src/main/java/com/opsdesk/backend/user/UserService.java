@@ -5,7 +5,7 @@ import java.util.List;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
-// The rules for reading users. Registering and logging in arrive in Week 8.
+// The rules for reading users. Registering and logging in are in AuthService.
 @Service
 public class UserService {
 

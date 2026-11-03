@@ -103,6 +103,24 @@ public class Ticket {
     @JoinColumn(name = "assignee_id")
     private AppUser assignee;
 
+    // The person who raised the ticket. The ownership rules ("own only",
+    // "own, if OPEN") compare it with the caller. A created_by_id column with
+    // a foreign key to app_user(id), named like assignee_id and project_id,
+    // and LAZY like the two above.
+    //
+    // Required, unlike assignee: every ticket has a creator by definition,
+    // so there is no legitimate null (NOTES.md, decision 27).
+    // optional = false tells Hibernate the link is always there;
+    // nullable = false puts NOT NULL on the column, so a code path that
+    // forgets the creator fails on insert instead of saving a ticket nobody
+    // owns.
+    //
+    // It is always set by the server: the seeder for seeded tickets, the
+    // logged-in user for new ones. Never from a request body.
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "created_by_id", nullable = false)
+    private AppUser createdBy;
+
     // Hibernate needs a no-argument constructor to create the empty object it
     // fills from a row. Protected, not public, so application code uses the
     // full constructor below and can't create a half-empty ticket by accident.
@@ -179,5 +197,13 @@ public class Ticket {
 
     public void setAssignee(AppUser assignee) {
         this.assignee = assignee;
+    }
+
+    public AppUser getCreatedBy() {
+        return createdBy;
+    }
+
+    public void setCreatedBy(AppUser createdBy) {
+        this.createdBy = createdBy;
     }
 }

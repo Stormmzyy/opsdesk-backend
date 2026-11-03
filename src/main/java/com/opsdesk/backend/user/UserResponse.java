@@ -6,8 +6,9 @@ package com.opsdesk.backend.user;
 //     "company": { "name" } }
 //
 // A User response never includes a password or a password hash, in any
-// response. AppUser doesn't have one yet (Week 8), and when it does, it won't
-// be added here.
+// response. AppUser has a passwordHash (and a role), and neither is a field
+// here. Every field is listed one by one below, so a field added to AppUser
+// never reaches a response unless it's added here on purpose.
 //
 // AppUser stores only name, username and email. The contract's other fields
 // (phone, address, company) come back as empty strings, the same convention

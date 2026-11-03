@@ -46,6 +46,46 @@ Hibernate creates and updates the tables automatically when the app starts (`ddl
 >
 > A database created fresh from today's code already has the right type. To start completely from scratch instead, remove the container (`docker rm -f opsdesk-db`, which deletes all its data) and run the `docker run` command above again.
 
+> **If your database was created before Tuesday of Week 7, recreate it.** Week 7 adds required columns: `password_hash` and `role` to `app_user`, and `created_by_id` to `ticket`. `ddl-auto: update` can't add a required column to a table that already has rows, so it logs a warning and the app starts anyway. Then every user endpoint (register, login, `GET /users`) answers 500, while the rest looks fine (see [NOTES.md](NOTES.md), decision 25). Everything in the database is sample data, so recreating it loses nothing:
+>
+> ```sh
+> docker rm -f opsdesk-db
+> docker run --name opsdesk-db -e POSTGRES_USER=opsdesk -e POSTGRES_PASSWORD=opsdesk -e POSTGRES_DB=opsdesk -p 5433:5432 -d postgres:16
+> ```
+>
+> Then start the app, and the seeder fills the new database. This also covers the `ALTER TABLE` above, because a fresh database already has the right `title` type.
+
+### Development password: for the seeded development database only
+
+**`devpassword123` is a development value.** It is the password of all six seeded users, and it only exists in the seeded development database that the app creates on your machine. It is not a real password and must never be used anywhere else.
+
+It's there so you can log in locally as any role:
+
+| Email | Role |
+| --- | --- |
+| `priya.sharma@opsdesk.com` | ADMIN |
+| `kwame.asante@opsdesk.com` | MANAGER |
+| `daniel.mensah@opsdesk.com` | AGENT |
+| `liam.carter@opsdesk.com` | AGENT |
+| `marco.silva@opsdesk.com` | AGENT |
+| `fatima.bello@opsdesk.com` | USER |
+
+The database never holds the password itself. The seeder hashes it through the app's `PasswordEncoder` (BCrypt), like any other password, so each user's `password_hash` is a different BCrypt hash starting with `$2a$`. Which user owns and is assigned which seeded ticket is laid out in [NOTES.md](NOTES.md), decision 27.
+
+### Making a user an admin
+
+A role is never taken from a request body. Registering always creates a plain user, and no endpoint lets anyone change their own role or anyone else's. So the first admin has to be made directly in the database, with SQL in psql:
+
+```sh
+docker exec -it opsdesk-db psql -U opsdesk
+```
+
+```sql
+update app_user set role = 'ADMIN' where email = '...';
+```
+
+Use the email in lowercase, because that's how emails are stored (see [NOTES.md](NOTES.md), decision 26). For local development the seeder already gives each sample user a role, so you only need this for an account you registered yourself. In a real deployment, this is how the first admin is created.
+
 ### Environment variables
 
 | Variable | Purpose | Default |
@@ -90,6 +130,19 @@ curl http://localhost:8080/api/v1/tickets
 ### Using it with the frontend
 
 The frontend ([opsdesk-frontend](https://github.com/Stormmzyy/opsdesk-frontend)) runs on <http://localhost:5173> and calls this API from the browser. The backend allows browser requests from **that origin only** (CORS, configured in `CorsConfig`). If the frontend runs on any other port, the browser blocks every request with "blocked by CORS policy", so keep it on 5173. `curl` and Postman aren't affected, because only browsers enforce CORS.
+
+## Permissions
+
+| Action | ADMIN | MANAGER | AGENT | USER |
+|---|---|---|---|---|
+| View tickets | all | all | all | own only |
+| Create ticket | yes | yes | yes | yes |
+| Edit ticket | any | any | assigned | own, if OPEN |
+| Assign ticket | yes | yes | no | no |
+| Delete ticket | yes | no | no | no |
+| List users | yes | yes | no | no |
+
+Authentication answers "who are you?" by checking the caller's identity, while authorization answers "what are you allowed to do?" by checking what that identity may do. In OpsDesk, authentication is logging in at `POST /api/v1/auth/login` with an email and password and then sending the returned token on every request, while authorization is this table deciding that an AGENT who is signed in still gets `403 FORBIDDEN` when trying to delete a ticket.
 
 ## Running the tests
 

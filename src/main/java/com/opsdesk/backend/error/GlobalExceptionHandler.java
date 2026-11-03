@@ -24,6 +24,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
+import com.opsdesk.backend.auth.InvalidCredentialsException;
 import com.opsdesk.backend.ticket.TicketIds;
 import com.opsdesk.backend.ticket.TicketNotFoundException;
 import com.opsdesk.backend.ticket.TicketService;
@@ -63,6 +64,19 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(NotFoundException.class)
     public ResponseEntity<ApiError> handleNotFound(NotFoundException exception) {
         return respond(HttpStatus.NOT_FOUND, ApiError.notFound(exception.getMessage()));
+    }
+
+    // 409 CONFLICT: registering an email or username that's already taken.
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<ApiError> handleConflict(ConflictException exception) {
+        return respond(HttpStatus.CONFLICT, ApiError.conflict(exception.getMessage()));
+    }
+
+    // 401 UNAUTHORIZED: a login with an unknown email or a wrong password,
+    // which get this same answer (AuthService.login).
+    @ExceptionHandler(InvalidCredentialsException.class)
+    public ResponseEntity<ApiError> handleInvalidCredentials(InvalidCredentialsException exception) {
+        return respond(HttpStatus.UNAUTHORIZED, ApiError.unauthorized(exception.getMessage()));
     }
 
     // 400 BAD_REQUEST: the body isn't valid JSON, isn't a JSON object ([] or

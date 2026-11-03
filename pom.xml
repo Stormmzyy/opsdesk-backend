@@ -28,6 +28,8 @@
 	</scm>
 	<properties>
 		<java.version>21</java.version>
+		<!-- Not managed by Spring Boot, so the version is set here. Latest 0.12.x, as the Week 7 guide asks. -->
+		<jjwt.version>0.12.7</jjwt.version>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -42,6 +44,33 @@
 			<groupId>org.springframework.boot</groupId>
 			<!-- Boot 3: spring-boot-starter-web -->
 			<artifactId>spring-boot-starter-webmvc</artifactId>
+		</dependency>
+		<!-- Same name in Boot 3. As soon as it's on the classpath, every endpoint needs a login. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+
+		<!-- JWT: the API is all the code compiles against; the implementation and its
+		     Jackson-based JSON support are only needed at runtime, as the jjwt README says. -->
+		<dependency>
+			<groupId>io.jsonwebtoken</groupId>
+			<artifactId>jjwt-api</artifactId>
+			<version>${jjwt.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>io.jsonwebtoken</groupId>
+			<artifactId>jjwt-impl</artifactId>
+			<version>${jjwt.version}</version>
+			<scope>runtime</scope>
+		</dependency>
+		<!-- jjwt-jackson uses Jackson 2 (com.fasterxml.jackson). Boot 4's own JSON is Jackson 3
+		     (tools.jackson); in Boot 3 both were Jackson 2. The two sit side by side without conflict. -->
+		<dependency>
+			<groupId>io.jsonwebtoken</groupId>
+			<artifactId>jjwt-jackson</artifactId>
+			<version>${jjwt.version}</version>
+			<scope>runtime</scope>
 		</dependency>
 
 		<dependency>
@@ -63,6 +92,20 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<!-- For Friday's tests. Boot 3: org.springframework.security:spring-security-test,
+		     added directly. In Boot 4 this per-feature starter brings it in. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<!-- An in-memory database for Friday's tests (application-test.yml), so they
+		     don't need PostgreSQL running. Version managed by Boot, same as Boot 3. -->
+		<dependency>
+			<groupId>com.h2database</groupId>
+			<artifactId>h2</artifactId>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>

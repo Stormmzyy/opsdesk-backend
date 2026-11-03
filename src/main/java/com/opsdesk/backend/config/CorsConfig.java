@@ -88,23 +88,27 @@ public class CorsConfig {
         // endpoints.
         config.setAllowedMethods(List.of("GET", "POST", "PATCH", "DELETE"));
         // The frontend sends Content-Type: application/json. Allowing any
-        // request header keeps adding one later (such as Authorization in
-        // Week 8) from silently breaking preflights.
+        // request header means the Authorization header that carries the
+        // Bearer token (Week 7) passes preflights without a change here.
         config.setAllowedHeaders(List.of("*"));
         // How long the browser may reuse a preflight answer before asking
         // again, in seconds.
         config.setMaxAge(3600L);
-        // No setAllowCredentials(true): there are no cookies or sessions until
-        // Week 8. When there are, it must be added here, and it only works with
-        // a named origin like the one above, never with "*".
+        // No setAllowCredentials(true): sign-in uses a Bearer token in a
+        // header, not cookies (NOTES.md, decision 19), so there is nothing for
+        // the browser to send automatically. If cookies were ever used, it
+        // would have to be added here, and it only works with a named origin
+        // like the one above, never with "*".
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/api/**", config);
 
         // Registered with the highest precedence, so it runs before every
-        // other filter. When Spring Security arrives in Week 8, its filters
-        // would otherwise reject a preflight (an OPTIONS request with no
-        // credentials) before CORS ever answered it.
+        // other filter, Spring Security's included. Otherwise the security
+        // filters would reject a preflight (an OPTIONS request, which never
+        // carries a token) with a 401 before CORS answered it, and a 401 sent
+        // without CORS headers couldn't be read by the page. That's why
+        // SecurityConfig has no .cors() of its own.
         FilterRegistrationBean<CorsFilter> registration = new FilterRegistrationBean<>(new CorsFilter(source));
         registration.setOrder(Ordered.HIGHEST_PRECEDENCE);
         return registration;
