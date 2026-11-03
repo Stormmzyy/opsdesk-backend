@@ -13,6 +13,9 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
+import jakarta.persistence.Version;
+
+import org.hibernate.annotations.DynamicUpdate;
 
 // @Entity: Hibernate maps this class to a table (named "ticket", from the
 // class name) and each Ticket object to one row in it.
@@ -20,7 +23,15 @@ import jakarta.persistence.ManyToOne;
 // A plain class with setters rather than a record, because Hibernate creates
 // an empty object and then fills in its fields one at a time when it reads a
 // row. A record can't be changed after it's created.
+//
+// @DynamicUpdate: Hibernate builds each UPDATE from the columns that actually
+// changed, instead of its default, a prepared UPDATE that lists every column.
+// A title-only PATCH then writes only the title, so it can't write back a
+// status it read earlier and someone else has since changed (NOTES.md,
+// decision 38). It only works on a managed entity, where Hibernate knows what
+// the row looked like when it was loaded; see TicketService.updateTicket.
 @Entity
+@DynamicUpdate
 public class Ticket {
 
     // @GeneratedValue(IDENTITY): PostgreSQL picks the id when the row is
@@ -121,6 +132,22 @@ public class Ticket {
     @JoinColumn(name = "created_by_id", nullable = false)
     private AppUser createdBy;
 
+    // Optimistic locking. Hibernate adds "and version=?" to every UPDATE of
+    // this row, with the version it read, and sets version = version + 1. If
+    // another request committed in between, the row's version has moved on,
+    // the UPDATE matches no row, and Hibernate throws instead of overwriting
+    // that change. @DynamicUpdate narrows what a stale request can overwrite;
+    // this makes the remaining conflict (two people changing the same field)
+    // fail loudly instead of "last write wins".
+    //
+    // Long, not long, for the same reason as id: Spring Data reads a null
+    // version as "new, INSERT it", and Hibernate sets 0 on insert.
+    //
+    // There is no setter. Only Hibernate changes it; code that set it could
+    // make a stale copy look current and defeat the check.
+    @Version
+    private Long version;
+
     // Hibernate needs a no-argument constructor to create the empty object it
     // fills from a row. Protected, not public, so application code uses the
     // full constructor below and can't create a half-empty ticket by accident.
@@ -205,5 +232,9 @@ public class Ticket {
 
     public void setCreatedBy(AppUser createdBy) {
         this.createdBy = createdBy;
+    }
+
+    public Long getVersion() {
+        return version;
     }
 }

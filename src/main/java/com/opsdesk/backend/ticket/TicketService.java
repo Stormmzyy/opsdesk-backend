@@ -10,6 +10,7 @@ import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.opsdesk.backend.error.InvalidFieldException;
 import com.opsdesk.backend.user.AppUser;
@@ -147,6 +148,21 @@ public class TicketService {
 
     // A null argument means "not sent, leave it alone". That's the difference
     // between PATCH (change some fields) and PUT (replace the whole ticket).
+    //
+    // @Transactional (NOTES.md, decision 38): the ticket is loaded, changed
+    // and flushed in ONE persistence context, so it stays managed from
+    // findById to commit. Without it, the repository's own transaction ended
+    // right after findById, the ticket came back detached, and save() had to
+    // merge it: re-read the row, copy every field from our copy onto it
+    // (including a status read before someone else changed it), then write
+    // them all. Managed, save() has nothing to merge, and at commit Hibernate
+    // compares the ticket with the snapshot it took on load, so
+    // @DynamicUpdate writes only the fields this request changed, and
+    // @Version refuses the write if the row moved on in between.
+    //
+    // The refusals below (404, 403) throw a RuntimeException, which rolls the
+    // transaction back; nothing was changed by then anyway.
+    @Transactional
     public Ticket updateTicket(String rawId, AppUser actor, String title, String description,
                                Priority priority, TicketStatus status, Team team) {
         // Looked up first, so a missing or hidden ticket is a 404 before
@@ -172,9 +188,10 @@ public class TicketService {
         if (team != null) {
             ticket.setTeam(team);
         }
-        // With today's List, the ticket was already changed in place, so this
-        // save does nothing new. With JPA tomorrow, save is what writes the
-        // change to the database, so it stays.
+        // The ticket is managed, so this save doesn't write anything itself:
+        // the UPDATE happens at commit, when the method returns. It stays so
+        // the method reads correctly, and still works if it's ever called
+        // without the transaction (it would merge, as before).
         return ticketRepository.save(ticket);
     }
 
@@ -192,6 +209,14 @@ public class TicketService {
     // Assigning to whoever already has it is not an error. The request asks
     // for an end state that already holds, so it answers 200 and, because
     // nothing changed, writes nothing.
+    //
+    // @Transactional for the same reason as updateTicket: the ticket stays
+    // managed, so save() doesn't re-read it to merge a detached copy. This is
+    // a tidy-up, not a correctness fix. Without it, the detached merge was
+    // already safe once Ticket had @Version: merge compares the copy's
+    // version with the row's and throws if the row moved on, so a stale
+    // assign failed instead of writing back an old status.
+    @Transactional
     public Ticket assignTicket(String rawId, AppUser actor, Long assigneeId) {
         Ticket ticket = getVisibleTicket(rawId, actor);
         canAssign(actor, ticket);
@@ -217,6 +242,7 @@ public class TicketService {
             }
         }
         ticket.setAssignee(assignee);
+        // Managed, so this writes nothing itself; the UPDATE runs at commit.
         return ticketRepository.save(ticket);
     }
 
