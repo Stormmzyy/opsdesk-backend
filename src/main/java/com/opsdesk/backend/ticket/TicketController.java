@@ -1,6 +1,7 @@
 package com.opsdesk.backend.ticket;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.ModelAttribute;
@@ -11,6 +12,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+
+import com.opsdesk.backend.user.AppUser;
 
 import jakarta.validation.Valid;
 
@@ -116,9 +119,20 @@ public class TicketController {
     // constructor has trimmed it), Spring runs every constraint on it. If any
     // fail, the method never runs and Spring throws
     // MethodArgumentNotValidException with every failing field.
-    public TicketResponse createTicket(@Valid @RequestBody CreateTicketRequest request) {
+    //
+    // @AuthenticationPrincipal: the signed-in user, which JwtAuthFilter put
+    // there from the token. It becomes the ticket's creator.
+    //
+    // The creator comes from the token and never from the request body, the
+    // same rule as the role on register. CreateTicketRequest has no
+    // createdBy or createdById field, so if a client sends one, Jackson
+    // finds nowhere to put it and ignores it: nobody can create a ticket in
+    // someone else's name. (Same annotation and package in Boot 3.)
+    public TicketResponse createTicket(@Valid @RequestBody CreateTicketRequest request,
+                                       @AuthenticationPrincipal AppUser actor) {
         return TicketResponse.from(ticketService.createTicket(
-                request.titleText(), request.descriptionText(), request.priorityValue(), request.teamValue()));
+                request.titleText(), request.descriptionText(), request.priorityValue(), request.teamValue(),
+                actor));
     }
 
     // PATCH /api/v1/tickets/{id} -> 200 with the whole updated ticket.

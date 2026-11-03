@@ -11,6 +11,11 @@ import com.opsdesk.backend.validation.TextField;
 // matching field here and ignores it (Spring Boot turns off "fail on unknown
 // properties"), so the request is accepted, not rejected.
 //
+// No createdBy either, for the same reason and a stronger one: the creator
+// is always the signed-in user, taken from the token (TicketController). A
+// createdBy or createdById in the body is ignored, so nobody can create a
+// ticket in someone else's name.
+//
 // Every field is Object, not String or an enum, so Jackson accepts whatever
 // JSON type the client sent and validation can name the problem: a number for
 // a title gets "Title must be text.", and "SUPER" for a priority gets the

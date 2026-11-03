@@ -1,12 +1,15 @@
 package com.opsdesk.backend.auth;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.opsdesk.backend.user.AppUser;
 import com.opsdesk.backend.user.UserResponse;
 
 import jakarta.validation.Valid;
@@ -46,5 +49,16 @@ public class AuthController {
     public LoginResponse login(@Valid @RequestBody LoginRequest request) {
         AuthService.LoginResult result = authService.login(request.emailText(), request.passwordText());
         return new LoginResponse(result.token(), UserResponse.from(result.user()));
+    }
+
+    // GET /api/v1/auth/me: the signed-in user, in the contract's User shape.
+    // Not one of the two open paths, so a request without a valid token never
+    // gets here: SecurityConfig answers 401 first. The user is the one
+    // JwtAuthFilter loaded from the database for this request (decision 28),
+    // so it reflects the account as it is now, not as it was when the token
+    // was issued.
+    @GetMapping("/me")
+    public UserResponse me(@AuthenticationPrincipal AppUser user) {
+        return UserResponse.from(user);
     }
 }

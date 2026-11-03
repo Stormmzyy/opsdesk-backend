@@ -10,6 +10,8 @@ import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 
+import com.opsdesk.backend.user.AppUser;
+
 // @Service marks this class as the business-logic layer. Like @Repository, it
 // tells Spring to create one TicketService at startup and hand it to anything
 // that asks for one. Technically @Service, @Repository and @Controller are all
@@ -81,9 +83,16 @@ public class TicketService {
 
     // Takes plain values, not the CreateTicketRequest, so the service doesn't
     // depend on the shape of an HTTP request body.
-    public Ticket createTicket(String title, String description, Priority priority, Team team) {
+    //
+    // createdBy is the signed-in user, passed in by the controller from the
+    // token, never anything the client sent. It's required (NOTES.md,
+    // decision 27): a null here fails on insert rather than saving a ticket
+    // nobody owns.
+    public Ticket createTicket(String title, String description, Priority priority, Team team,
+                               AppUser createdBy) {
         // Every new ticket starts as OPEN, whatever the client asked for.
         Ticket ticket = new Ticket(trim(title), trim(description), priority, TicketStatus.OPEN, team);
+        ticket.setCreatedBy(createdBy);
         return ticketRepository.save(ticket);
     }
 
