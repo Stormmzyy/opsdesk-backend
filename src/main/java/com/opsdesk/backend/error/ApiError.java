@@ -45,6 +45,13 @@ public record ApiError(String error, String message, Map<String, String> fields)
         return new ApiError("UNAUTHORIZED", message, null);
     }
 
+    // NOTES.md, decision 21. One fixed message for every refusal: it says
+    // the action isn't allowed, never which rule refused it, so a caller
+    // can't probe the rules by reading the reasons.
+    public static ApiError forbidden() {
+        return new ApiError("FORBIDDEN", "You don't have permission to do this.", null);
+    }
+
     // Deliberately says nothing about what went wrong: no exception text, no
     // SQL, no stack trace. Those are logged on the server instead.
     public static ApiError internal() {

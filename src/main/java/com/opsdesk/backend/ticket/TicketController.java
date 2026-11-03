@@ -1,6 +1,7 @@
 package com.opsdesk.backend.ticket;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -87,26 +88,32 @@ public class TicketController {
     // @ModelAttribute builds TicketListParams from the query string, and
     // @Valid checks it. A bad page, size or status never reaches this method:
     // GlobalExceptionHandler answers VALIDATION_ERROR naming the parameter.
+    //
+    // Both shapes contain only the tickets the caller may see: a USER's list
+    // is her own tickets, and her page's totals count only those.
     @GetMapping
-    public Object listTickets(@Valid @ModelAttribute TicketListParams params) {
+    public Object listTickets(@Valid @ModelAttribute TicketListParams params,
+                              @AuthenticationPrincipal AppUser actor) {
         if (!params.anySent()) {
-            return ticketService.listTickets().stream()
+            return ticketService.listTickets(actor).stream()
                     .map(TicketResponse::from)
                     .toList();
         }
         long page = params.pageNumber();
         int size = params.pageSize();
         return TicketPage.from(
-                ticketService.findTickets(page, size, params.statusValue(), params.searchText()),
+                ticketService.findTickets(page, size, params.statusValue(), params.searchText(), actor),
                 page, size);
     }
 
     // GET /api/v1/tickets/{id} -> 200, or 404 via GlobalExceptionHandler.
     // @PathVariable copies the {id} part of the URL into the id parameter as
-    // text; TicketIds.parse decides whether it's a valid id.
+    // text. The service parses it, so that a missing ticket and a ticket the
+    // caller may not see give exactly the same 404 (TicketService,
+    // getVisibleTicket).
     @GetMapping("/{id}")
-    public TicketResponse getTicket(@PathVariable String id) {
-        return TicketResponse.from(ticketService.getTicket(TicketIds.parse(id)));
+    public TicketResponse getTicket(@PathVariable String id, @AuthenticationPrincipal AppUser actor) {
+        return TicketResponse.from(ticketService.getVisibleTicket(id, actor));
     }
 
     // POST /api/v1/tickets -> 201 Created with the new ticket.
@@ -138,19 +145,90 @@ public class TicketController {
     // PATCH /api/v1/tickets/{id} -> 200 with the whole updated ticket.
     // PATCH, not PUT, because the client sends only the fields it wants to
     // change; PUT would mean "replace the whole ticket with this body".
+    //
+    // No @PreAuthorize: every role may edit something, so who may edit
+    // depends on the ticket. TicketService decides, after loading it.
     @PatchMapping("/{id}")
-    public TicketResponse updateTicket(@PathVariable String id, @Valid @RequestBody UpdateTicketRequest request) {
-        return TicketResponse.from(ticketService.updateTicket(TicketIds.parse(id),
+    public TicketResponse updateTicket(@PathVariable String id, @Valid @RequestBody UpdateTicketRequest request,
+                                       @AuthenticationPrincipal AppUser actor) {
+        return TicketResponse.from(ticketService.updateTicket(id, actor,
                 request.titleText(), request.descriptionText(), request.priorityValue(),
                 request.statusValue(), request.teamValue()));
     }
 
     // DELETE /api/v1/tickets/{id} -> 204 No Content. A void method with 204
     // sends no body at all, which is what the contract requires.
+    //
+    // Only an ADMIN deletes (README.md, Permissions). This is a role gate,
+    // decision 22 step 2: the answer depends only on who the caller is, never
+    // on which ticket, so it can be decided from the token alone, before the
+    // ticket is loaded. @PreAuthorize runs before the method body, so a
+    // refused caller never reaches the lookup: a MANAGER deleting ticket 999
+    // gets 403, not 404. That reveals nothing, because the answer is the
+    // same for every id.
+    //
+    // The ownership rules (an AGENT editing what's assigned to them, a USER
+    // editing their own OPEN ticket) can't work this way. Their answer
+    // depends on the ticket's creator, assignee and status, so the ticket has
+    // to be loaded first. They run in TicketService after the lookup,
+    // decision 22 step 4.
+    //
+    // hasRole('ADMIN') adds the ROLE_ prefix itself and checks for the
+    // authority ROLE_ADMIN, which is what JwtAuthFilter grants. If the filter
+    // granted a bare "ADMIN" instead, nothing would fail loudly: every role
+    // gate would quietly refuse everyone with a 403.
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void deleteTicket(@PathVariable String id) {
-        ticketService.deleteTicket(TicketIds.parse(id));
+    @PreAuthorize("hasRole('ADMIN')")
+    public void deleteTicket(@PathVariable String id, @AuthenticationPrincipal AppUser actor) {
+        ticketService.deleteTicket(id, actor);
+    }
+
+    // PATCH /api/v1/tickets/{id}/assignee -> 200 with the ticket.
+    // Body: { "assigneeId": 2 }. (NOTES.md, decision 27.)
+    //
+    // Its own endpoint, not an "assigneeId" field in PATCH /tickets/{id},
+    // for two reasons:
+    //   - Assigning and editing are different rows of the permission table,
+    //     with different permissions: an AGENT may edit a ticket assigned to
+    //     them but may not assign it. One combined request could mix a change
+    //     the caller may make with one they may not, and the server would have
+    //     to refuse all of it or apply half.
+    //   - The role gate depends on nothing but the path, so on its own
+    //     endpoint it can be decided before the ticket is loaded or the body
+    //     is read (decision 22, step 2). TicketEditAccessInterceptor is what
+    //     makes "before the body is read" true; see it for why
+    //     @PreAuthorize alone can't.
+    //
+    // @PreAuthorize is the role gate; TicketService.canAssign repeats it as
+    // the rule itself. Its comment says what each one catches.
+    //
+    // KEEP IN STEP: the role list here ('ADMIN', 'MANAGER'), on this method
+    // and on unassignTicket below, duplicates the one in
+    // TicketService.canAssign. Nothing makes them agree. Change one and
+    // change both, or the HTTP gate and the service rule will disagree about
+    // who may assign.
+    //
+    // The response is the contract's ticket, which has no assignee field
+    // yet, so it can't show who the ticket is now assigned to. Adding one is
+    // a contract change for Thursday.
+    @PatchMapping("/{id}/assignee")
+    @PreAuthorize("hasAnyRole('ADMIN', 'MANAGER')")
+    public TicketResponse assignTicket(@PathVariable String id, @Valid @RequestBody AssignTicketRequest request,
+                                       @AuthenticationPrincipal AppUser actor) {
+        return TicketResponse.from(ticketService.assignTicket(id, actor, request.assigneeIdValue()));
+    }
+
+    // DELETE /api/v1/tickets/{id}/assignee -> 200 with the ticket, now
+    // assigned to nobody. The way to unassign: in the PATCH body null means
+    // "not sent" (decision 11), so it can't also mean "remove the assignee".
+    // Removing someone who isn't there is a no-op, like assigning someone who
+    // already is. 200 with the ticket rather than 204, so both assignee
+    // endpoints answer the same way.
+    @DeleteMapping("/{id}/assignee")
+    @PreAuthorize("hasAnyRole('ADMIN', 'MANAGER')")
+    public TicketResponse unassignTicket(@PathVariable String id, @AuthenticationPrincipal AppUser actor) {
+        return TicketResponse.from(ticketService.assignTicket(id, actor, null));
     }
 
     // No error handlers here any more. Every error, from this controller or

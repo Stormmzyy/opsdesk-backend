@@ -5,10 +5,9 @@ import com.opsdesk.backend.common.PathIds;
 // Turns the {id} text from a ticket URL into a Long, or throws
 // TicketNotFoundException (a 404).
 //
-// Its own class, not a private method on the controller, because two places
-// need exactly the same rule: the controller, and the global exception
-// handler, which has to read the id from the URL of a PATCH whose body Spring
-// couldn't read or validate (NOTES.md, decision 6).
+// Its own class rather than a private method, so there's exactly one rule.
+// TicketService.getVisibleTicket is its caller: every ticket URL, and the
+// PATCH interceptor, comes through there.
 //
 // The rule itself (digits only, the same regex as the frontend's parseId.ts)
 // lives in PathIds, shared with projects.
