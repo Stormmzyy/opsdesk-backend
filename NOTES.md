@@ -959,6 +959,22 @@ Every index costs space and a write on every insert and update. One that no plan
 
 **Filtered COUNTs are different.** A USER's count is served by the kept index and costs about her own ticket count. An ADMIN's count by status is linear by nature (decision 57), and the same contract question applies to it.
 
+### 59. `role` is on every User response
+
+**The problem, found while rewriting the contract.** No response carried the caller's role. `UserResponse` had no `role` field, and `GET /auth/me` returns a `UserResponse`. Two clients need it:
+- **A client deciding which buttons to show** the signed-in user. The contract's permission table is useless if the client can't tell which row it's in.
+- **A MANAGER's assign dropdown.** The assign endpoint refuses a USER with a 400 (decision 37), and without `role` the dropdown can't leave USERs out. It would offer people whom the endpoint then refuses.
+
+**The decision.** `role` goes on `UserResponse` itself, so it reaches both `GET /auth/me` and `GET /users`, and not as a field only on `/auth/me`.
+
+**Rejected: reading the token's `role` claim.**
+- **The claim isn't authoritative.** The server never trusts it: the role used is the one read from the database on every request (decision 28). A client reading the claim would show the role the user had at login, for up to 60 minutes after an administrator changed it.
+- **It would make every client decode a JWT just to render a button,** and turn the token's contents into part of the contract. The contract says they aren't.
+
+**What it reveals.** `GET /users` is ADMIN and MANAGER only, and they could already learn every user's role from the assign endpoint's messages (decision 37). `/auth/me` gives a user only her own role.
+
+**The dropdown's filter is a copy of a server rule.** The contract tells a client to keep users whose `role` isn't `USER`, which duplicates the assign endpoint's own check. The better shape would be a server-side filter, for example `GET /users?assignable=true`, so the rule lives in one place. It's not built: one client, one rule, and the endpoint still refuses a USER whatever the client offers.
+
 ### Comments in `AppUser` that this week makes wrong
 
 Two comments in `AppUser.java` say things arrive in **Week 8**: the password hash, and the `409 CONFLICT` for registering a taken email. Both arrive tomorrow, in Week 7, so both comments become wrong. They're fixed as part of Tuesday's work, not separately.
