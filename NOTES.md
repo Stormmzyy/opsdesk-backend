@@ -564,38 +564,81 @@ An in-memory H2 may lock, isolate or create schemas differently. This hasn't bee
 - **Binding it on the ticket PATCH**, for the reason above.
 - **Silently ignoring it, as `createdBy` is.** A client has no legitimate way to set `createdBy`, so ignoring it hides nothing. A client sending `assigneeId` on the ticket PATCH is trying to assign, and there *is* a right way to do that. Ignoring it would answer 200 while not doing what was asked, and the client would find out later, if at all.
 
+  *Superseded by decision 40:* `createdBy` is now refused too, so all three output-only fields follow one rule.
+
 **Thursday's tests for it:**
 - An AGENT sends `PATCH /tickets/{id}` with `{"assigneeId": <someone else's id>}` on a ticket assigned to them. They get **400**, and the row's `assignee_id` is unchanged.
 - The same AGENT sends `{"assigneeId": <their own id>}` on a ticket assigned to nobody. They get **403**: they can't edit that ticket at all, and the interceptor refuses before the body is read (decision 33). The row's `assignee_id` is still NULL.
 
 Together these cover both ways the field could be abused: handing off a ticket they hold, and claiming one they were never given.
 
-### 40. `@Version` only catches simultaneous writes. A stale edit form can still silently overwrite the same field
+**`version` joins it** on Thursday's contract change: on every ticket response, refused on input, for the reasons in decision 40.
+
+### 40. `@Version` only catches simultaneous writes. A stale full-form save can still silently revert other people's changes
 
 **What the guard compares.** `@Version` compares the version the **server** loaded with the row's version at the moment of writing. The server loads the ticket fresh at the start of each request, microseconds before it writes. So the guard fires only on **true simultaneity**: two requests whose load-to-commit windows overlap. That's what decision 38 closed, and what `TicketLostUpdateTest` proves.
 
-**The case it doesn't catch: a stale form.**
-1. Fatima opens #4's edit form.
-2. Kwame changes the ticket and saves.
-3. Minutes later, Fatima saves.
+**The case it doesn't catch: a stale form.** Someone opens a ticket's edit form, someone else changes the ticket and saves, and minutes later the first person saves. The second request loads the ticket *after* the other commit, so the server sees no conflict. What happens next depends on the role, because the frontend's Edit page sends the **whole form** on every save. Every field the person didn't touch carries the value they *saw* when the page loaded, which may now be old.
 
-Her request loads the ticket *after* Kwame's commit, so the server sees no conflict:
-- **If they changed different fields, nothing is lost.** `@DynamicUpdate` writes only the fields her request changes.
+- **A USER is saved by the field restriction.** Fatima opens #4. Kwame changes its priority (or moves it on from OPEN). Fatima fixes the title and saves. Her form sends the old priority, which is now "present and different" (decision 34), so she gets a **403** and nothing is written. If Kwame moved the ticket out of OPEN, `canEdit` refuses her anyway. Either way, nothing is lost.
 
-  The frontend's Edit page sends the whole form. But a field she left alone carries the value she *saw*, which is now old. If that differs from Kwame's new value, it counts as a change and is written. So "different fields" holds for API clients that send only what they changed. For the full-form Edit page, any field Kwame changed comes back as her stale copy. For a USER, status, priority and team are refused instead of written (decision 34, "present and different"), so what's exposed is title and description.
-- **If they changed the same field, hers overwrites his silently, with no 409.** The server never saw a conflict.
+  The answer misleads her, though: she's told she lacks permission when she only touched the title. Reloading shows why. Only a field she *may* change (title, description) can overwrite someone else's change silently, and only if they changed the same one.
+- **ADMIN, MANAGER and AGENT have no field restriction, and that is where the exposure is widest.** Daniel opens #1, which is assigned to him. Kwame moves it to IN_PROGRESS. Daniel fixes a typo in the title and saves. His form sends the status he saw, `OPEN`. It's different from the row's, so `@DynamicUpdate` counts it as a change, and **Kwame's status is silently reverted**, with no 409 and nothing in the log. That holds for every field, not just the one being edited. The exposure is widest for exactly the roles whose changes matter most, and what gets reverted is status, not just title.
+- **The same field, changed on purpose by both, is a genuine conflict for every role.** The later save wins silently.
 
-**What we can claim.** Concurrent requests can't lose each other's writes. Nothing stops a client from saving on top of a version it never saw.
+**There is no server-only fix.** A full-form PATCH is **ambiguous by construction**. When the body says `"status": "OPEN"`, the server can't tell "I want the status to be OPEN" from "the status was OPEN when my page loaded". Both are the same bytes. `@Version` and `@DynamicUpdate` are everything the backend can do alone. They stop two requests in flight from losing each other's writes (decision 38), but they can't recover an intent the request never carried.
 
-**The fix, and why we're not making it now.** The client would have to send back the version it read: an `If-Match` header with an ETag, or a `version` field in the PATCH body. The server then compares *that* with the row instead of its own fresh load, and answers 409 when they differ. It's the right fix, but it's a contract change. It would need:
-- `version` (or an ETag) on every ticket response
-- a rule for requests that omit it
-- the frontend storing it and sending it back on every edit and assign
+**What we can claim.** Concurrent requests can't lose each other's writes. A client can still save on top of a state it never saw, and from the full-form page, that can revert fields the person never meant to touch.
+
+**The preferred fix: the frontend sends only the fields that were changed.** The Edit page compares the form with the ticket as loaded, and PATCHes only the differences. Then:
+- **The stale-form revert disappears.** Daniel's typo fix sends only `title`, so Kwame's status is never in the request.
+- **Decision 34 can become the simpler "present at all".** "Present and different" existed only to keep the full-form page working for a USER. Once the page sends only changes, any `status`, `priority` or `team` in a USER's request is an attempt to change it, and can be refused as such.
+
+One change on the other side of the wire resolves both compromises. It needs no contract change to the request shape (a PATCH with fewer fields is already valid), only a frontend change, so it is raised with the frontend rather than made here.
+
+What it leaves is the genuine same-field conflict. That's the remaining case, and it's tolerable: both people meant to change that field, and the later one did.
+
+**The rejected alternative: `If-Match` (or a `version` field in the PATCH body).** The client sends back the version it read. The server compares it with the row instead of its own fresh load, and answers 409 when they differ. That closes even the same-field case. It loses on cost:
+- a contract change: an ETag or `version` on every response, and a rule for requests that omit it
+- the frontend storing the version and sending it back on every edit and assign
 - a "someone changed this, reload" screen
 
-That's a round of contract and frontend work. And the case it closes matters most on **title and description**, where a silent overwrite is annoying (someone retypes a sentence) rather than dangerous.
+That's a round of contract and frontend work, for a case that matters most on title and description, where a silent overwrite is annoying (someone retypes a sentence) rather than dangerous. Revisit it if a field arrives whose silent overwrite would be dangerous.
 
-**Revisit it** when an edit form is likely to stay open long enough for this to bite in practice, or when a field arrives whose silent overwrite would be dangerous.
+**`version` goes on the ticket shape now, output-only, next to `assigneeId`** (decision 39). Without it in responses, nothing can ever send it back, so `If-Match` could never be added without another contract change. Friday's tests also can't read it, and they need to: versions only go up, and a restore is a write too, so the walk leaves them well above 0.
+
+On input, it's refused with a 400, not ignored. Two reasons:
+- **It doesn't pretend.** A client sending `version` on a PATCH believes it's asking for a conflict check. Ignoring it would answer 200 without doing what was asked: decision 39's own argument.
+- **It's forward compatible.** If `If-Match`-style checks ever arrive through a `version` field, relaxing a 400 into an accepted field breaks nobody, because no working client sends it. Ignoring it now would let clients get into the habit of sending it, harmlessly. On the day it started meaning something, they would suddenly get conflict checks, and 409s, they never asked for. A refusal keeps the field unused until it means something.
+
+**One rule for all three output-only fields.** `createdBy`, `assigneeId` and `version` appear in responses, and **every one of them is refused with a 400 on input**, on `POST /tickets` and `PATCH /tickets/{id}`. That's one rule in the contract instead of "refuse two, ignore one".
+
+This replaces decision 39's "ignore `createdBy`". The frontend was checked first (`opsdesk-frontend` main, `70dc092`), and nothing sends it:
+- **Create** sends the form's `TicketFormValues`.
+- **Edit** builds its form from exactly five named fields (title, description, priority, team, status), not by spreading a `Ticket`.
+- **The board's move** sends only `status`.
+
+So refusing it breaks no existing client. If the Edit page were ever changed to `{...ticket}`, it would now fail loudly with a 400, rather than quietly echoing server-owned fields back.
+
+**Found while checking: unknown fields are accepted silently today.** Measured against the running app:
+- `PATCH /tickets/12` with `{"titel": "..."}` (a typo in the key) answered **200** and changed nothing.
+- `{"version": 0}` and `{"createdBy": 5}` on a PATCH answered 200, ignored.
+- A `POST` carrying `createdBy`, `assigneeId` and `version` answered 201 with all three dropped.
+
+Nothing in this repo configures that. It's Spring Boot's auto-configured mapper, which doesn't fail on unknown properties, and nothing here overrides it. So `createdBy` was never "declared to be ignored": it's ignored because every unknown field is, typos included.
+
+**And the contract promises it.** Its Conventions section says: "Fields the server doesn't recognise in a request body are **ignored**, not rejected". `POST /tickets` says the same of `id` and `status`. So the silence is today's contract, not an accident of configuration. It's also decision 39's "answer 200 while not doing what was asked", for any misspelt key.
+
+**Two consequences for Thursday's contract rewrite:**
+- **Refusing the three output-only fields is an exception to that rule.** The rewrite must either name them as exceptions, or reverse the rule. It can't do neither.
+- **Reversing the rule is a change of status code** (200 → 400) for bodies that are accepted today. The contract's own versioning paragraph lists that as breaking. The frontend sends no unrecognised fields (checked above), so in practice it breaks nobody. It still has to be a deliberate decision in the rewrite, not something that slips in.
+
+If the rule is reversed, the likely way to do it:
+- Make the mapper fail on unknown properties.
+- Map that failure to `VALIDATION_ERROR` on the offending field's name, rather than letting it fall into the generic `BAD_REQUEST` ("The request body must be a JSON object."), which would be the wrong message.
+- `createdBy`, `assigneeId` and `version` then need no code of their own: they're unknown to the request records. Each gets a message that names the right way to do the thing, such as the assign endpoint for `assigneeId`.
+
+Not done yet: it's part of the contract change.
 
 ### Comments in `AppUser` that this week makes wrong
 
