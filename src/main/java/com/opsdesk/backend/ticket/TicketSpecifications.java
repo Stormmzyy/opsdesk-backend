@@ -4,6 +4,9 @@ import java.util.Locale;
 
 import org.springframework.data.jpa.domain.Specification;
 
+import com.opsdesk.backend.user.AppUser;
+import com.opsdesk.backend.user.Role;
+
 // The WHERE clause for GET /tickets with filters, built from optional parts.
 //
 // A derived query (like findByStatus) has a fixed set of conditions in its
@@ -26,6 +29,26 @@ final class TicketSpecifications {
             spec = spec.and(titleOrDescriptionContains(search));
         }
         return spec;
+    }
+
+    // Which tickets this caller may see (README.md, Permissions; NOTES.md,
+    // decision 27). ADMIN, MANAGER and AGENT see every ticket, so no
+    // condition. A USER sees only the tickets she created, so the condition
+    // is created_by_id = her id.
+    //
+    // It's a condition in the query itself, not a filter applied to the rows
+    // afterwards, because the same WHERE clause feeds the COUNT that gives
+    // totalElements and totalPages. Filtering a loaded page instead would
+    // count tickets she can't see (totalElements 12 for a caller who can see
+    // 2), and a page of 20 would come back with whatever survived the filter.
+    //
+    // root.get("createdBy").get("id") compares the foreign key column
+    // directly; Hibernate doesn't need to join app_user for it.
+    static Specification<Ticket> visibleTo(AppUser actor) {
+        if (actor.getRole() != Role.USER) {
+            return Specification.unrestricted();
+        }
+        return (root, query, cb) -> cb.equal(root.get("createdBy").get("id"), actor.getId());
     }
 
     private static Specification<Ticket> hasStatus(TicketStatus status) {

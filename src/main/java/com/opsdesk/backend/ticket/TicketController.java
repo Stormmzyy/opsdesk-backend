@@ -88,26 +88,32 @@ public class TicketController {
     // @ModelAttribute builds TicketListParams from the query string, and
     // @Valid checks it. A bad page, size or status never reaches this method:
     // GlobalExceptionHandler answers VALIDATION_ERROR naming the parameter.
+    //
+    // Both shapes contain only the tickets the caller may see: a USER's list
+    // is her own tickets, and her page's totals count only those.
     @GetMapping
-    public Object listTickets(@Valid @ModelAttribute TicketListParams params) {
+    public Object listTickets(@Valid @ModelAttribute TicketListParams params,
+                              @AuthenticationPrincipal AppUser actor) {
         if (!params.anySent()) {
-            return ticketService.listTickets().stream()
+            return ticketService.listTickets(actor).stream()
                     .map(TicketResponse::from)
                     .toList();
         }
         long page = params.pageNumber();
         int size = params.pageSize();
         return TicketPage.from(
-                ticketService.findTickets(page, size, params.statusValue(), params.searchText()),
+                ticketService.findTickets(page, size, params.statusValue(), params.searchText(), actor),
                 page, size);
     }
 
     // GET /api/v1/tickets/{id} -> 200, or 404 via GlobalExceptionHandler.
     // @PathVariable copies the {id} part of the URL into the id parameter as
-    // text; TicketIds.parse decides whether it's a valid id.
+    // text. The service parses it, so that a missing ticket and a ticket the
+    // caller may not see give exactly the same 404 (TicketService,
+    // getVisibleTicket).
     @GetMapping("/{id}")
-    public TicketResponse getTicket(@PathVariable String id) {
-        return TicketResponse.from(ticketService.getTicket(TicketIds.parse(id)));
+    public TicketResponse getTicket(@PathVariable String id, @AuthenticationPrincipal AppUser actor) {
+        return TicketResponse.from(ticketService.getVisibleTicket(id, actor));
     }
 
     // POST /api/v1/tickets -> 201 Created with the new ticket.
@@ -145,7 +151,7 @@ public class TicketController {
     @PatchMapping("/{id}")
     public TicketResponse updateTicket(@PathVariable String id, @Valid @RequestBody UpdateTicketRequest request,
                                        @AuthenticationPrincipal AppUser actor) {
-        return TicketResponse.from(ticketService.updateTicket(TicketIds.parse(id), actor,
+        return TicketResponse.from(ticketService.updateTicket(id, actor,
                 request.titleText(), request.descriptionText(), request.priorityValue(),
                 request.statusValue(), request.teamValue()));
     }
@@ -175,7 +181,7 @@ public class TicketController {
     @ResponseStatus(HttpStatus.NO_CONTENT)
     @PreAuthorize("hasRole('ADMIN')")
     public void deleteTicket(@PathVariable String id, @AuthenticationPrincipal AppUser actor) {
-        ticketService.deleteTicket(TicketIds.parse(id), actor);
+        ticketService.deleteTicket(id, actor);
     }
 
     // No error handlers here any more. Every error, from this controller or

@@ -44,14 +44,22 @@ public class TicketService {
     // The contract says the list is sorted by id, so the service asks for that
     // order explicitly. A plain findAll() has no ORDER BY, and PostgreSQL then
     // returns rows in whatever order they sit on disk. (NOTES.md, decision 7.)
-    public List<Ticket> listTickets() {
-        return ticketRepository.findAll(Sort.by("id"));
+    //
+    // Only the tickets this caller may see: every ticket for ADMIN, MANAGER
+    // and AGENT, only her own for a USER (TicketSpecifications.visibleTo).
+    public List<Ticket> listTickets(AppUser actor) {
+        return ticketRepository.findAll(TicketSpecifications.visibleTo(actor), Sort.by("id"));
     }
 
     // One page of tickets, optionally filtered by status and search text.
     // page is 1-based, as the contract counts; status and search may be null.
-    public Page<Ticket> findTickets(long page, int size, TicketStatus status, String search) {
-        Specification<Ticket> filters = TicketSpecifications.matching(status, search);
+    //
+    // The visibility condition is part of the same Specification, so it's in
+    // the WHERE clause of both the page query and the count query: a USER's
+    // totalItems and totalPages count only her own tickets.
+    public Page<Ticket> findTickets(long page, int size, TicketStatus status, String search, AppUser actor) {
+        Specification<Ticket> filters = TicketSpecifications.matching(status, search)
+                .and(TicketSpecifications.visibleTo(actor));
 
         // A page so far out that its first row would be past row 2,147,483,647
         // can't be asked for: Hibernate's offset is an int, and the request
@@ -83,6 +91,40 @@ public class TicketService {
                 .orElseThrow(() -> new TicketNotFoundException(id));
     }
 
+    // A ticket as one caller may see it, looked up by the id exactly as it
+    // appeared in the URL. Every endpoint with a ticket id in its path comes
+    // through here: GET, PATCH, DELETE, and the PATCH interceptor.
+    //
+    // Three outcomes, two of them deliberately indistinguishable:
+    //   - the id isn't a valid id, or no ticket has it: 404
+    //   - the ticket exists, but this caller may not see it: the SAME 404
+    //   - otherwise, the ticket
+    //
+    // DELIBERATE: a ticket the caller can't see answers 404, not 403
+    // (NOTES.md, decision 23). A 403 would confirm that the ticket exists
+    // and belongs to someone else, so a USER could count other people's
+    // tickets and probe their ids one by one. With the 404, "hidden" and
+    // "doesn't exist" look exactly alike.
+    //
+    // This looks like a bug to anyone who doesn't know it's on purpose:
+    // the ticket is right there in the database, and the API says it doesn't
+    // exist. Don't "fix" it to a 403. That would put the leak back.
+    //
+    // Identical means identical: both refusals are built here, from the same
+    // raw id text. The contract quotes the id as it was in the URL, so
+    // /tickets/02 must say "02" whether ticket 2 is missing or merely hidden.
+    // Building the hidden one from ticket.getId() would say "2" and give it
+    // away.
+    public Ticket getVisibleTicket(String rawId, AppUser actor) {
+        Long id = TicketIds.parse(rawId);
+        Ticket ticket = ticketRepository.findById(id)
+                .orElseThrow(() -> new TicketNotFoundException(rawId));
+        if (!canView(actor, ticket)) {
+            throw new TicketNotFoundException(rawId);
+        }
+        return ticket;
+    }
+
     // Takes plain values, not the CreateTicketRequest, so the service doesn't
     // depend on the shape of an HTTP request body.
     //
@@ -100,11 +142,11 @@ public class TicketService {
 
     // A null argument means "not sent, leave it alone". That's the difference
     // between PATCH (change some fields) and PUT (replace the whole ticket).
-    public Ticket updateTicket(Long id, AppUser actor, String title, String description,
+    public Ticket updateTicket(String rawId, AppUser actor, String title, String description,
                                Priority priority, TicketStatus status, Team team) {
-        // Looked up first, so a missing ticket is a 404 before anything else
-        // happens to it.
-        Ticket ticket = getTicket(id);
+        // Looked up first, so a missing or hidden ticket is a 404 before
+        // anything else happens to it.
+        Ticket ticket = getVisibleTicket(rawId, actor);
         // Then the ownership rules (decision 22, step 4): may this caller
         // edit this ticket at all, and if they're a USER, does the request
         // only touch the fields she may change?
@@ -131,10 +173,10 @@ public class TicketService {
         return ticketRepository.save(ticket);
     }
 
-    public void deleteTicket(Long id, AppUser actor) {
+    public void deleteTicket(String rawId, AppUser actor) {
         // Deleting a missing ticket is a 404 in the contract, not a silent
         // success, so look it up before deleting.
-        Ticket ticket = getTicket(id);
+        Ticket ticket = getVisibleTicket(rawId, actor);
         // The controller's @PreAuthorize already refuses everyone but an
         // ADMIN. This repeats the rule where the rules live, so it still holds
         // if something other than that controller method ever deletes.
@@ -161,9 +203,24 @@ public class TicketService {
     // proxies) even when they're the same person.
     // ---------------------------------------------------------------------
 
+    // View: ADMIN, MANAGER and AGENT see every ticket; a USER sees only the
+    // tickets she created. The list applies the same rule as a query
+    // (TicketSpecifications.visibleTo); this is the single-ticket form.
+    //
+    // The one rule that answers instead of throwing. The other three throw
+    // AccessDeniedException, which becomes a 403. A view refusal must not
+    // become a 403: it has to come out as the same 404 as a ticket that
+    // doesn't exist (decision 23), built from the raw id in the URL, which
+    // only the caller has. So canView only says yes or no, and
+    // getVisibleTicket turns "no" into that 404.
+    boolean canView(AppUser actor, Ticket ticket) {
+        return actor.getRole() != Role.USER || sameUser(actor, ticket.getCreatedBy());
+    }
+
     // Edit, the ticket-level part. Which fields a USER may change is checked
     // separately, by rejectFieldsAUserMayNotChange, because it needs the
-    // request. This part doesn't.
+    // request. This part doesn't, so TicketEditAccessInterceptor can run it
+    // before the body is read (decision 22: step 4 before the 400s).
     public void canEdit(AppUser actor, Ticket ticket) {
         switch (actor.getRole()) {
             case ADMIN, MANAGER -> {
@@ -243,7 +300,7 @@ public class TicketService {
         }
     }
 
-    // Compared by id: see the note above canEdit. Reading getId() on a
+    // Compared by id: see the note above canView. Reading getId() on a
     // Hibernate proxy returns the id it already holds without loading the
     // row, so this works outside a transaction too. Checked with SQL logging:
     // an AGENT refused on someone else's ticket runs exactly two SELECTs (the
