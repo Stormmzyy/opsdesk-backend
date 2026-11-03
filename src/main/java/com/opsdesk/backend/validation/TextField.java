@@ -52,6 +52,14 @@ public @interface TextField {
     // Used when the value is shorter than minLength.
     String tooShortMessage() default "";
 
+    // The longest value allowed, counted in bytes of UTF-8, not characters.
+    // Only the password uses it: BCrypt refuses more than 72 bytes (NOTES.md,
+    // decision 29). No limit unless set.
+    int maxUtf8Bytes() default Integer.MAX_VALUE;
+
+    // Used when the value is longer than maxUtf8Bytes.
+    String tooLongMessage() default "";
+
     // Used when the value is a number, boolean, object or array.
     String notTextMessage();
 }

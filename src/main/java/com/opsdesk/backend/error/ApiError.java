@@ -37,6 +37,14 @@ public record ApiError(String error, String message, Map<String, String> fields)
         return new ApiError("VALIDATION_ERROR", String.join(" ", fields.values()), fields);
     }
 
+    public static ApiError conflict(String message) {
+        return new ApiError("CONFLICT", message, null);
+    }
+
+    public static ApiError unauthorized(String message) {
+        return new ApiError("UNAUTHORIZED", message, null);
+    }
+
     // Deliberately says nothing about what went wrong: no exception text, no
     // SQL, no stack trace. Those are logged on the server instead.
     public static ApiError internal() {

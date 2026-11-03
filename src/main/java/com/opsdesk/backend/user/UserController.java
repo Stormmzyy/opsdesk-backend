@@ -6,9 +6,9 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-// GET /api/v1/users, the contract's user directory. POST /users (register)
-// arrives with authentication in Week 8, and from then this list will need a
-// signed-in user.
+// GET /api/v1/users, the contract's user directory. It needs a signed-in
+// user. Registering isn't here: it's POST /api/v1/auth/register, in
+// AuthController (NOTES.md, decision 18).
 //
 // The path is /users, not /app_users or /appUsers: the entity is called
 // AppUser only because "user" is reserved in PostgreSQL (see AppUser). That's
