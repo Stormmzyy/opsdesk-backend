@@ -1001,6 +1001,19 @@ The passwords are hashed with **BCrypt at cost factor 10** (`new BCryptPasswordE
 
 **What the numbers show, and what they don't.** These three medians show **no gross timing difference** between an unknown email and a wrong password, so the response time doesn't obviously reveal which emails have accounts. They do **not** show that login is constant-time. That would take a distribution: many samples per case, under realistic load, and a statistical comparison. A difference smaller than the noise of five requests on a development machine would not show up here. The contract claims only that both cases "take about as long", which is what was measured.
 
+### 61. Single tickets get their own shape test: every service method that returns a ticket takes the caller
+
+**What was found in review.** `TicketService.getTicket(Long id)` was public, read a ticket with **no visibility check**, and had no caller outside `TicketServiceTest`. Nothing reached it from HTTP, but it was exactly the method a future endpoint could pick up by mistake, and leak a USER's view of someone else's ticket. `TicketRepositoryShapeTest` couldn't catch it: that test guards the repository's *list* queries, and this was a single-ticket method in the service.
+
+**Why single tickets need a guard one layer up.** The repository's `findById` takes no caller, on purpose: the visibility check for one ticket has to turn "not allowed" into the same 404 as "doesn't exist" (decision 23), which a query can't do. So that check lives in `TicketService.getVisibleTicket`. That made the rule for single tickets a convention: "always go through `getVisibleTicket`".
+
+**The decision:**
+- **`getTicket(Long)` is deleted,** along with the `TicketNotFoundException(Long)` constructor that only it used.
+- **`TicketServiceTest`** now tests `getVisibleTicket`, the lookup every endpoint uses. It's a Mockito unit test with no database, so there's no stored state to read through a repository. It covers a found ticket, a missing one, a hidden one (the same 404 message for the same id), and an id that isn't a number (a 404 with no query).
+- **`TicketServiceShapeTest`**, the twin of the repository test, fails if any public method declared on `TicketService` returns a `Ticket` or `TicketResponse` (or a `List`, `Page` or `Optional` of them) without taking an `AppUser`. With `getTicket(Long)` put back, it reported: `public com.opsdesk.backend.ticket.Ticket com.opsdesk.backend.ticket.TicketService.getTicket(java.lang.Long) returns a ticket without taking the caller, so it can't check visibility`.
+
+**What it doesn't prove.** It checks that a method *takes* the caller, not that it *uses* her for visibility. A method that accepts an `AppUser` and ignores it would pass. That's still a review question, made much narrower: today every such method goes through `getVisibleTicket` or `findVisible`.
+
 ### Comments in `AppUser` that this week makes wrong
 
 Two comments in `AppUser.java` say things arrive in **Week 8**: the password hash, and the `409 CONFLICT` for registering a taken email. Both arrive tomorrow, in Week 7, so both comments become wrong. They're fixed as part of Tuesday's work, not separately.
