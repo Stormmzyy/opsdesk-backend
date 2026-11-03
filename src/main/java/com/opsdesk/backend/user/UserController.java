@@ -2,6 +2,7 @@ package com.opsdesk.backend.user;
 
 import java.util.List;
 
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -24,7 +25,13 @@ public class UserController {
     }
 
     // 200 with a plain array sorted by id; [] when there are none.
+    //
+    // ADMIN and MANAGER only (README.md, Permissions). A role gate, like the
+    // one on DELETE /tickets/{id}: there's no ticket involved, so the answer
+    // depends on the caller's role alone and is decided before the method
+    // runs. An AGENT or USER gets 403.
     @GetMapping
+    @PreAuthorize("hasAnyRole('ADMIN', 'MANAGER')")
     public List<UserResponse> listUsers() {
         return userService.listUsers().stream()
                 .map(UserResponse::from)

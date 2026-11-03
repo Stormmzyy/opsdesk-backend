@@ -1,6 +1,7 @@
 package com.opsdesk.backend.ticket;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -147,8 +148,28 @@ public class TicketController {
 
     // DELETE /api/v1/tickets/{id} -> 204 No Content. A void method with 204
     // sends no body at all, which is what the contract requires.
+    //
+    // Only an ADMIN deletes (README.md, Permissions). This is a role gate,
+    // decision 22 step 2: the answer depends only on who the caller is, never
+    // on which ticket, so it can be decided from the token alone, before the
+    // ticket is loaded. @PreAuthorize runs before the method body, so a
+    // refused caller never reaches the lookup: a MANAGER deleting ticket 999
+    // gets 403, not 404. That reveals nothing, because the answer is the
+    // same for every id.
+    //
+    // The ownership rules (an AGENT editing what's assigned to them, a USER
+    // editing their own OPEN ticket) can't work this way. Their answer
+    // depends on the ticket's creator, assignee and status, so the ticket has
+    // to be loaded first. They run in TicketService after the lookup,
+    // decision 22 step 4.
+    //
+    // hasRole('ADMIN') adds the ROLE_ prefix itself and checks for the
+    // authority ROLE_ADMIN, which is what JwtAuthFilter grants. If the filter
+    // granted a bare "ADMIN" instead, nothing would fail loudly: every role
+    // gate would quietly refuse everyone with a 403.
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
+    @PreAuthorize("hasRole('ADMIN')")
     public void deleteTicket(@PathVariable String id) {
         ticketService.deleteTicket(TicketIds.parse(id));
     }

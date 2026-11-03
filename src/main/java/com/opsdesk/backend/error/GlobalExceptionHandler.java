@@ -15,6 +15,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.validation.FieldError;
 import org.springframework.web.ErrorResponse;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
@@ -28,6 +31,7 @@ import com.opsdesk.backend.auth.InvalidCredentialsException;
 import com.opsdesk.backend.ticket.TicketIds;
 import com.opsdesk.backend.ticket.TicketNotFoundException;
 import com.opsdesk.backend.ticket.TicketService;
+import com.opsdesk.backend.user.AppUser;
 
 import jakarta.servlet.http.HttpServletRequest;
 
@@ -77,6 +81,45 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(InvalidCredentialsException.class)
     public ResponseEntity<ApiError> handleInvalidCredentials(InvalidCredentialsException exception) {
         return respond(HttpStatus.UNAUTHORIZED, ApiError.unauthorized(exception.getMessage()));
+    }
+
+    // 403 FORBIDDEN (NOTES.md, decision 21).
+    //   401 means "we don't know who you are": no token, or one that isn't
+    //   valid. It's answered by UnauthorizedEntryPoint, inside the security
+    //   filters, before a controller is ever reached.
+    //   403 means "we know exactly who you are, and the answer is no": a
+    //   signed-in caller whose role, or whose relationship to the ticket,
+    //   doesn't allow this action.
+    //
+    // Two places throw AccessDeniedException: @PreAuthorize, when a role gate
+    // refuses before the controller method runs (decision 22, step 2), and
+    // TicketService's ownership rules (step 4). Both happen inside Spring
+    // MVC's call to the controller, which is why this handler sees them.
+    // Without it, the catch-all below would report a refusal as a 500.
+    //
+    // Spring Security 7's @PreAuthorize actually throws
+    // AuthorizationDeniedException, a subclass, so this handler covers it
+    // as well. (Same in Boot 3 from Spring Security 6.3; before that it threw
+    // AccessDeniedException itself.)
+    //
+    // The client always gets the same body. The real reason is logged here
+    // at WARN instead: who the caller was, the request (whose path holds the
+    // ticket id), and which rule refused. TicketService's rules put all of
+    // that in the exception's message; a @PreAuthorize refusal only says
+    // "Access Denied", so the caller and the path are what identify it.
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ApiError> handleForbidden(AccessDeniedException exception, HttpServletRequest request) {
+        log.warn("403 FORBIDDEN on {} {} for {}: {}", request.getMethod(), request.getRequestURI(),
+                describeCaller(), exception.getMessage());
+        return respond(HttpStatus.FORBIDDEN, ApiError.forbidden());
+    }
+
+    private static String describeCaller() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication != null && authentication.getPrincipal() instanceof AppUser user) {
+            return user.getRole() + " " + user.getEmail() + " (user " + user.getId() + ")";
+        }
+        return "an unauthenticated caller";
     }
 
     // 400 BAD_REQUEST: the body isn't valid JSON, isn't a JSON object ([] or
