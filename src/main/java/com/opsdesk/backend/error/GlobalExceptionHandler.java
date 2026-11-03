@@ -132,6 +132,15 @@ public class GlobalExceptionHandler {
         return respond(HttpStatus.BAD_REQUEST, ApiError.validation(fieldMessages(exception)));
     }
 
+    // 400 VALIDATION_ERROR for a field only the database could check, such
+    // as an assignee id that matches no user. Same shape as @Valid's, so the
+    // client handles both in one place.
+    @ExceptionHandler(InvalidFieldException.class)
+    public ResponseEntity<ApiError> handleInvalidField(InvalidFieldException exception) {
+        return respond(HttpStatus.BAD_REQUEST,
+                ApiError.validation(Map.of(exception.getField(), exception.getMessage())));
+    }
+
     // The URL matches no endpoint at all, such as /api/v1/tickets/ with a
     // trailing slash. Spring reports this as "no resource found"; the contract
     // calls it NOT_FOUND.

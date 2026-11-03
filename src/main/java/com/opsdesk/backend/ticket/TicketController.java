@@ -184,6 +184,53 @@ public class TicketController {
         ticketService.deleteTicket(id, actor);
     }
 
+    // PATCH /api/v1/tickets/{id}/assignee -> 200 with the ticket.
+    // Body: { "assigneeId": 2 }. (NOTES.md, decision 27.)
+    //
+    // Its own endpoint, not an "assigneeId" field in PATCH /tickets/{id},
+    // for two reasons:
+    //   - Assigning and editing are different rows of the permission table,
+    //     with different permissions: an AGENT may edit a ticket assigned to
+    //     them but may not assign it. One combined request could mix a change
+    //     the caller may make with one they may not, and the server would have
+    //     to refuse all of it or apply half.
+    //   - The role gate depends on nothing but the path, so on its own
+    //     endpoint it can be decided before the ticket is loaded or the body
+    //     is read (decision 22, step 2). TicketEditAccessInterceptor is what
+    //     makes "before the body is read" true; see it for why
+    //     @PreAuthorize alone can't.
+    //
+    // @PreAuthorize is the role gate; TicketService.canAssign repeats it as
+    // the rule itself. Its comment says what each one catches.
+    //
+    // KEEP IN STEP: the role list here ('ADMIN', 'MANAGER'), on this method
+    // and on unassignTicket below, duplicates the one in
+    // TicketService.canAssign. Nothing makes them agree. Change one and
+    // change both, or the HTTP gate and the service rule will disagree about
+    // who may assign.
+    //
+    // The response is the contract's ticket, which has no assignee field
+    // yet, so it can't show who the ticket is now assigned to. Adding one is
+    // a contract change for Thursday.
+    @PatchMapping("/{id}/assignee")
+    @PreAuthorize("hasAnyRole('ADMIN', 'MANAGER')")
+    public TicketResponse assignTicket(@PathVariable String id, @Valid @RequestBody AssignTicketRequest request,
+                                       @AuthenticationPrincipal AppUser actor) {
+        return TicketResponse.from(ticketService.assignTicket(id, actor, request.assigneeIdValue()));
+    }
+
+    // DELETE /api/v1/tickets/{id}/assignee -> 200 with the ticket, now
+    // assigned to nobody. The way to unassign: in the PATCH body null means
+    // "not sent" (decision 11), so it can't also mean "remove the assignee".
+    // Removing someone who isn't there is a no-op, like assigning someone who
+    // already is. 200 with the ticket rather than 204, so both assignee
+    // endpoints answer the same way.
+    @DeleteMapping("/{id}/assignee")
+    @PreAuthorize("hasAnyRole('ADMIN', 'MANAGER')")
+    public TicketResponse unassignTicket(@PathVariable String id, @AuthenticationPrincipal AppUser actor) {
+        return TicketResponse.from(ticketService.assignTicket(id, actor, null));
+    }
+
     // No error handlers here any more. Every error, from this controller or
     // from Spring before it, is turned into the contract's error body by
     // com.opsdesk.backend.error.GlobalExceptionHandler.

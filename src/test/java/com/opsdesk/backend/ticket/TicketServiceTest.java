@@ -14,6 +14,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import com.opsdesk.backend.user.AppUserRepository;
+
 // Unit tests for TicketService, with the repository replaced by a mock.
 //
 // What Mockito is doing:
@@ -57,11 +59,16 @@ class TicketServiceTest {
     @Mock
     private TicketRepository ticketRepository;
 
+    // Only needed for assigning, which these tests don't cover, but the
+    // constructor asks for it.
+    @Mock
+    private AppUserRepository appUserRepository;
+
     private TicketService ticketService;
 
     @BeforeEach
     void createService() {
-        ticketService = new TicketService(ticketRepository);
+        ticketService = new TicketService(ticketRepository, appUserRepository);
     }
 
     @Test

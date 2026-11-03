@@ -18,10 +18,13 @@ public class WebConfig implements WebMvcConfigurer {
     }
 
     // Only on single-ticket paths. "*" matches exactly one path segment, so
-    // this is /api/v1/tickets/{id} and not the list; the interceptor itself
-    // only acts on PATCH.
+    // "/api/v1/tickets/*" is /tickets/{id} and NOT /tickets/{id}/assignee:
+    // that one needs its own pattern (measured: with only the first, the
+    // assignee endpoint skipped the interceptor). The interceptor itself
+    // decides which methods it acts on.
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
-        registry.addInterceptor(ticketEditAccessInterceptor).addPathPatterns("/api/v1/tickets/*");
+        registry.addInterceptor(ticketEditAccessInterceptor)
+                .addPathPatterns("/api/v1/tickets/*", "/api/v1/tickets/*/assignee");
     }
 }

@@ -11,7 +11,9 @@ import org.springframework.data.jpa.domain.Specification;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 
+import com.opsdesk.backend.error.InvalidFieldException;
 import com.opsdesk.backend.user.AppUser;
+import com.opsdesk.backend.user.AppUserRepository;
 import com.opsdesk.backend.user.Role;
 
 // @Service marks this class as the business-logic layer. Like @Repository, it
@@ -34,11 +36,14 @@ public class TicketService {
     // final: set once in the constructor and never swapped afterwards, so the
     // service can never be left without a repository.
     private final TicketRepository ticketRepository;
+    // Only to look up the user a ticket is being assigned to.
+    private final AppUserRepository appUserRepository;
 
     // A class with a single constructor needs no @Autowired: Spring uses that
-    // constructor and passes in a TicketRepository it has already created.
-    public TicketService(TicketRepository ticketRepository) {
+    // constructor and passes in the repositories it has already created.
+    public TicketService(TicketRepository ticketRepository, AppUserRepository appUserRepository) {
         this.ticketRepository = ticketRepository;
+        this.appUserRepository = appUserRepository;
     }
 
     // The contract says the list is sorted by id, so the service asks for that
@@ -173,6 +178,48 @@ public class TicketService {
         return ticketRepository.save(ticket);
     }
 
+    // Assign the ticket to a user, or (assigneeId null) unassign it. The
+    // controller sends null only for DELETE /assignee: in the PATCH body
+    // assigneeId is required, so a missing field can never unassign.
+    //
+    // The checks, in decision 22's order:
+    //   404 the ticket doesn't exist or can't be seen (getVisibleTicket)
+    //   403 the caller isn't an ADMIN or MANAGER (canAssign)
+    //   400 VALIDATION_ERROR the assignee is no user, or is a USER
+    // The 400s come last because they're about the body, and the only way to
+    // check them is to look the user up.
+    //
+    // Assigning to whoever already has it is not an error. The request asks
+    // for an end state that already holds, so it answers 200 and, because
+    // nothing changed, writes nothing.
+    public Ticket assignTicket(String rawId, AppUser actor, Long assigneeId) {
+        Ticket ticket = getVisibleTicket(rawId, actor);
+        canAssign(actor, ticket);
+        AppUser assignee = null;
+        if (assigneeId != null) {
+            // 400, not 404: the URL's resource, the ticket, exists. What's
+            // wrong is a value in the body.
+            //
+            // Together, "No user with id 99." and "A USER can't be assigned
+            // tickets." reveal which user ids exist and which of them are
+            // USERs. That's safe ONLY because assigning is limited to ADMIN
+            // and MANAGER, who can already list every user (GET /users). If
+            // assigning is ever opened to AGENT, these two messages become a
+            // user enumeration oracle for a role that can't list users, and
+            // they'd have to become one message that says neither.
+            assignee = appUserRepository.findById(assigneeId)
+                    .orElseThrow(() -> new InvalidFieldException("assigneeId", "No user with id " + assigneeId + "."));
+            // A USER raises tickets and doesn't work them (NOTES.md, decision
+            // 27: the reason #9 lost its assignee). ADMIN, MANAGER and AGENT
+            // can all be assigned; the seed has a MANAGER on #7.
+            if (assignee.getRole() == Role.USER) {
+                throw new InvalidFieldException("assigneeId", "A USER can't be assigned tickets.");
+            }
+        }
+        ticket.setAssignee(assignee);
+        return ticketRepository.save(ticket);
+    }
+
     public void deleteTicket(String rawId, AppUser actor) {
         // Deleting a missing ticket is a 404 in the contract, not a silent
         // success, so look it up before deleting.
@@ -285,8 +332,20 @@ public class TicketService {
         }
     }
 
-    // Assign: ADMIN and MANAGER only. For the assign endpoint, which comes
-    // with the next change.
+    // Assign: ADMIN and MANAGER only.
+    //
+    // The same rule also sits in @PreAuthorize on the two assignee endpoints.
+    // Both exist because they catch different things:
+    //   - @PreAuthorize is the role gate at the HTTP door. It documents the
+    //     rule where the endpoint is declared, and still refuses if the
+    //     interceptor's path patterns ever stop matching the endpoint. It
+    //     runs only after the body has been read, though, which is why
+    //     TicketEditAccessInterceptor calls this method first, with no
+    //     ticket, to keep the role 403 ahead of the 400s (decision 22).
+    //   - this method is the rule itself, in the service, so it holds for any
+    //     caller of assignTicket: a future endpoint that forgets the
+    //     annotation, a scheduled job, a test. Without it, the rule would
+    //     live only in an annotation that every new caller has to remember.
     void canAssign(AppUser actor, Ticket ticket) {
         if (actor.getRole() != Role.ADMIN && actor.getRole() != Role.MANAGER) {
             throw refusal(actor, ticket, "only an ADMIN or MANAGER may assign tickets");
@@ -312,9 +371,13 @@ public class TicketService {
     // The message never reaches the client (ApiError.forbidden() has one
     // fixed message); GlobalExceptionHandler logs it at WARN. So it names
     // everything a reader of the log needs: who, which ticket, which rule.
+    // The ticket is null when a role rule refuses before any lookup (the
+    // interceptor's assign gate); the request path in the log line still
+    // names it.
     private static AccessDeniedException refusal(AppUser actor, Ticket ticket, String rule) {
+        String where = ticket == null ? "before the ticket was loaded" : "on ticket " + ticket.getId();
         return new AccessDeniedException(actor.getRole() + " " + actor.getEmail() + " (user " + actor.getId()
-                + ") refused on ticket " + ticket.getId() + ": " + rule);
+                + ") refused " + where + ": " + rule);
     }
 
     // The contract trims free-text fields before saving them. strip() rather
