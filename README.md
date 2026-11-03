@@ -111,21 +111,34 @@ The API starts on <http://localhost:8080>. Stop it with Ctrl+C.
 
 Every path starts with `/api/v1`, and every request and response is exactly as [API_CONTRACT.md](https://github.com/Stormmzyy/opsdesk-frontend/blob/main/API_CONTRACT.md) describes, including the error body (`{ "error", "message", "fields" }`).
 
-| Endpoint | What it does |
-| --- | --- |
-| `GET /tickets` | Every ticket, sorted by id. With `page`, `size`, `status` or `search`, one page of tickets in the contract's envelope. |
-| `GET /tickets/{id}` | One ticket |
-| `POST /tickets` | Create a ticket |
-| `PATCH /tickets/{id}` | Change some of a ticket's fields |
-| `DELETE /tickets/{id}` | Delete a ticket |
-| `GET /projects`, `GET /projects/{id}` | Projects (read-only) |
-| `GET /users` | The user directory (read-only) |
+Every endpoint except register and login needs a token: `Authorization: Bearer <token>`, from `POST /auth/login`. Without one, every request, to any path, answers `401 UNAUTHORIZED`. Who may do what is in [Permissions](#permissions).
 
-A quick check that it's up:
+| Endpoint | Who | What it does |
+| --- | --- | --- |
+| `POST /auth/register` | anyone | Create an account. It's always a USER. |
+| `POST /auth/login` | anyone | Sign in: returns a token (valid for 60 minutes) and the user. |
+| `GET /auth/me` | signed in | The signed-in user, including their `role`. |
+| `GET /tickets` | signed in | The tickets the caller may see, sorted by id. With `page`, `size`, `status`, `priority`, `team`, `search` or `sort`, one page of them in the contract's envelope. |
+| `GET /tickets/{id}` | signed in | One ticket, or 404 if it doesn't exist or the caller may not see it. |
+| `POST /tickets` | signed in | Create a ticket, with the caller as its creator. |
+| `PATCH /tickets/{id}` | depends on the ticket | Change some of a ticket's fields. |
+| `DELETE /tickets/{id}` | ADMIN | Delete a ticket. |
+| `PATCH /tickets/{id}/assignee` | ADMIN, MANAGER | Assign a ticket: `{"assigneeId": n}`. |
+| `DELETE /tickets/{id}/assignee` | ADMIN, MANAGER | Unassign a ticket. |
+| `GET /projects`, `GET /projects/{id}` | signed in | Projects (read-only). |
+| `GET /users` | ADMIN, MANAGER | The user directory (read-only). |
+
+A quick check that it's up, signing in as the seeded ADMIN and listing the tickets (the password is the development one above):
 
 ```sh
-curl http://localhost:8080/api/v1/tickets
+TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email": "priya.sharma@opsdesk.com", "password": "devpassword123"}' \
+  | sed -E 's/.*"token":"([^"]+)".*/\1/')
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/tickets
 ```
+
+The same `curl http://localhost:8080/api/v1/tickets` without the header answers `401`, which also shows the app is up.
 
 ### Using it with the frontend
 
