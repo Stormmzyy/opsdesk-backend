@@ -7,3 +7,14 @@ spring:
     hibernate:
       ddl-auto: update
     open-in-view: false
+
+app:
+  jwt:
+    # Read from the JWT_SECRET environment variable. The default after the
+    # colon is for local development only; any real deployment sets
+    # JWT_SECRET. It must be at least 32 characters, or JwtService refuses
+    # to start.
+    secret: ${JWT_SECRET:dev-only-secret-change-me-at-least-32-chars}
+    # How long a token from login stays valid. After that the client logs in
+    # again; there is no refresh token.
+    expiry-minutes: 60
