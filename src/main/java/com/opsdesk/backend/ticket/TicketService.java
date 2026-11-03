@@ -8,9 +8,11 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 
 import com.opsdesk.backend.user.AppUser;
+import com.opsdesk.backend.user.Role;
 
 // @Service marks this class as the business-logic layer. Like @Repository, it
 // tells Spring to create one TicketService at startup and hand it to anything
@@ -98,11 +100,16 @@ public class TicketService {
 
     // A null argument means "not sent, leave it alone". That's the difference
     // between PATCH (change some fields) and PUT (replace the whole ticket).
-    public Ticket updateTicket(Long id, String title, String description,
+    public Ticket updateTicket(Long id, AppUser actor, String title, String description,
                                Priority priority, TicketStatus status, Team team) {
         // Looked up first, so a missing ticket is a 404 before anything else
         // happens to it.
         Ticket ticket = getTicket(id);
+        // Then the ownership rules (decision 22, step 4): may this caller
+        // edit this ticket at all, and if they're a USER, does the request
+        // only touch the fields she may change?
+        canEdit(actor, ticket);
+        rejectFieldsAUserMayNotChange(actor, ticket, priority, status, team);
         if (title != null) {
             ticket.setTitle(trim(title));
         }
@@ -124,13 +131,133 @@ public class TicketService {
         return ticketRepository.save(ticket);
     }
 
-    public void deleteTicket(Long id) {
+    public void deleteTicket(Long id, AppUser actor) {
         // Deleting a missing ticket is a 404 in the contract, not a silent
-        // success, so check before deleting.
-        if (!ticketRepository.existsById(id)) {
-            throw new TicketNotFoundException(id);
+        // success, so look it up before deleting.
+        Ticket ticket = getTicket(id);
+        // The controller's @PreAuthorize already refuses everyone but an
+        // ADMIN. This repeats the rule where the rules live, so it still holds
+        // if something other than that controller method ever deletes.
+        canDelete(actor, ticket);
+        ticketRepository.delete(ticket);
+    }
+
+    // ---------------------------------------------------------------------
+    // The ownership rules: README.md's permission table, as NOTES.md
+    // decision 27 reads it. Each method takes the caller and the ticket,
+    // returns quietly when the rule allows the action, and throws
+    // AccessDeniedException when it doesn't. GlobalExceptionHandler turns
+    // that into the client's 403, with one fixed message; the reason given
+    // here is only logged, at WARN, for whoever reads the server log.
+    //
+    // They run after the ticket is loaded (decision 22, step 4), because
+    // their answer depends on the ticket: who created it, who it's assigned
+    // to, what its status is. That's why they live here and not in a
+    // @PreAuthorize on the controller, which runs before any lookup.
+    //
+    // People are compared by id, never as objects. The actor comes from
+    // JwtAuthFilter and the ticket's creator and assignee from this ticket's
+    // row, so they're different Java objects (the ticket's are Hibernate
+    // proxies) even when they're the same person.
+    // ---------------------------------------------------------------------
+
+    // Edit, the ticket-level part. Which fields a USER may change is checked
+    // separately, by rejectFieldsAUserMayNotChange, because it needs the
+    // request. This part doesn't.
+    public void canEdit(AppUser actor, Ticket ticket) {
+        switch (actor.getRole()) {
+            case ADMIN, MANAGER -> {
+                // Any ticket.
+            }
+            case AGENT -> {
+                // Only a ticket assigned to them. Not one assigned to nobody
+                // (#6, #9): an unassigned ticket is waiting for a MANAGER to
+                // hand it to someone, and an AGENT editing it would be working
+                // it without being given it. Not one assigned to someone else
+                // (#3 is Liam's), so two agents never work the same ticket.
+                if (ticket.getAssignee() == null) {
+                    throw refusal(actor, ticket, "an AGENT may only edit tickets assigned to them; it is assigned to nobody");
+                }
+                if (!sameUser(actor, ticket.getAssignee())) {
+                    throw refusal(actor, ticket, "an AGENT may only edit tickets assigned to them; it is assigned to someone else");
+                }
+            }
+            case USER -> {
+                // Only her own ticket, and only while it's OPEN. Once someone
+                // is working it, the ticket is theirs to change, not hers.
+                if (!sameUser(actor, ticket.getCreatedBy())) {
+                    throw refusal(actor, ticket, "a USER may only edit tickets she created");
+                }
+                if (ticket.getStatus() != TicketStatus.OPEN) {
+                    throw refusal(actor, ticket, "a USER may only edit her own ticket while it is OPEN; it is " + ticket.getStatus());
+                }
+            }
         }
-        ticketRepository.deleteById(id);
+    }
+
+    // Edit, the field-level part, for a USER only: on her own OPEN ticket she
+    // may change title and description, and nothing else.
+    //
+    // Why not status too: the wider reading is a trap. If she could change
+    // the status, she could move her ticket to IN_PROGRESS, and at that
+    // moment it's no longer OPEN, so she has lost the right to edit it. She
+    // couldn't move it back either, because reopening it would itself be an
+    // edit. One request would lock her out of her own ticket for good
+    // (NOTES.md, decision 27). Priority and team are refused with it: those
+    // are how the people who work tickets triage them.
+    //
+    // "Change" means present AND different from the current value. A field
+    // sent with the value it already has is not an attempt to change it.
+    // That matters for the real frontend: its Edit page sends the whole form
+    // (title, description, priority, team and status) on every save, so
+    // refusing a field merely for being present would refuse every edit she
+    // makes there, even a title-only one.
+    private void rejectFieldsAUserMayNotChange(AppUser actor, Ticket ticket,
+                                               Priority priority, TicketStatus status, Team team) {
+        if (actor.getRole() != Role.USER) {
+            return;
+        }
+        if (status != null && status != ticket.getStatus()) {
+            throw refusal(actor, ticket, "a USER may not change status");
+        }
+        if (priority != null && priority != ticket.getPriority()) {
+            throw refusal(actor, ticket, "a USER may not change priority");
+        }
+        if (team != null && team != ticket.getTeam()) {
+            throw refusal(actor, ticket, "a USER may not change team");
+        }
+    }
+
+    // Assign: ADMIN and MANAGER only. For the assign endpoint, which comes
+    // with the next change.
+    void canAssign(AppUser actor, Ticket ticket) {
+        if (actor.getRole() != Role.ADMIN && actor.getRole() != Role.MANAGER) {
+            throw refusal(actor, ticket, "only an ADMIN or MANAGER may assign tickets");
+        }
+    }
+
+    // Delete: ADMIN only.
+    void canDelete(AppUser actor, Ticket ticket) {
+        if (actor.getRole() != Role.ADMIN) {
+            throw refusal(actor, ticket, "only an ADMIN may delete tickets");
+        }
+    }
+
+    // Compared by id: see the note above canEdit. Reading getId() on a
+    // Hibernate proxy returns the id it already holds without loading the
+    // row, so this works outside a transaction too. Checked with SQL logging:
+    // an AGENT refused on someone else's ticket runs exactly two SELECTs (the
+    // caller by email, the ticket by id) and none for the assignee.
+    private static boolean sameUser(AppUser actor, AppUser other) {
+        return other != null && actor.getId().equals(other.getId());
+    }
+
+    // The message never reaches the client (ApiError.forbidden() has one
+    // fixed message); GlobalExceptionHandler logs it at WARN. So it names
+    // everything a reader of the log needs: who, which ticket, which rule.
+    private static AccessDeniedException refusal(AppUser actor, Ticket ticket, String rule) {
+        return new AccessDeniedException(actor.getRole() + " " + actor.getEmail() + " (user " + actor.getId()
+                + ") refused on ticket " + ticket.getId() + ": " + rule);
     }
 
     // The contract trims free-text fields before saving them. strip() rather

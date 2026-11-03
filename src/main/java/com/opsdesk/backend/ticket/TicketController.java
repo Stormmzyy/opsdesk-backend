@@ -139,9 +139,13 @@ public class TicketController {
     // PATCH /api/v1/tickets/{id} -> 200 with the whole updated ticket.
     // PATCH, not PUT, because the client sends only the fields it wants to
     // change; PUT would mean "replace the whole ticket with this body".
+    //
+    // No @PreAuthorize: every role may edit something, so who may edit
+    // depends on the ticket. TicketService decides, after loading it.
     @PatchMapping("/{id}")
-    public TicketResponse updateTicket(@PathVariable String id, @Valid @RequestBody UpdateTicketRequest request) {
-        return TicketResponse.from(ticketService.updateTicket(TicketIds.parse(id),
+    public TicketResponse updateTicket(@PathVariable String id, @Valid @RequestBody UpdateTicketRequest request,
+                                       @AuthenticationPrincipal AppUser actor) {
+        return TicketResponse.from(ticketService.updateTicket(TicketIds.parse(id), actor,
                 request.titleText(), request.descriptionText(), request.priorityValue(),
                 request.statusValue(), request.teamValue()));
     }
@@ -170,8 +174,8 @@ public class TicketController {
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     @PreAuthorize("hasRole('ADMIN')")
-    public void deleteTicket(@PathVariable String id) {
-        ticketService.deleteTicket(TicketIds.parse(id));
+    public void deleteTicket(@PathVariable String id, @AuthenticationPrincipal AppUser actor) {
+        ticketService.deleteTicket(TicketIds.parse(id), actor);
     }
 
     // No error handlers here any more. Every error, from this controller or
