@@ -91,13 +91,6 @@ public class TicketService {
         return ticketRepository.findVisible(actor, filters, order, pageable);
     }
 
-    // orElseThrow turns "no such ticket" into an exception right here, so every
-    // method that needs an existing ticket gets the same 404 for free.
-    public Ticket getTicket(Long id) {
-        return ticketRepository.findById(id)
-                .orElseThrow(() -> new TicketNotFoundException(id));
-    }
-
     // A ticket as one caller may see it, looked up by the id exactly as it
     // appeared in the URL. Every endpoint with a ticket id in its path comes
     // through here: GET, PATCH, DELETE, and the PATCH interceptor.
