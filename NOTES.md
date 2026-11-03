@@ -975,6 +975,32 @@ Every index costs space and a write on every insert and update. One that no plan
 
 **The dropdown's filter is a copy of a server rule.** The contract tells a client to keep users whose `role` isn't `USER`, which duplicates the assign endpoint's own check. The better shape would be a server-side filter, for example `GET /users?assignable=true`, so the rule lives in one place. It's not built: one client, one rule, and the endpoint still refuses a USER whatever the client offers.
 
+### 60. The contract was checked against the running app. Its captures should be pinned by tests
+
+**What was done.** The API contract was rewritten (opsdesk-frontend PR #51), and every example response in it was captured from this backend, running on a freshly seeded database. Each example sits under a hidden comment naming the exact request and caller, so it can be re-run. About 50 further claims were also checked against the running app: expired and malformed tokens, a role changed mid-session, the 72-byte password limit, ids with leading zeros, and the order of the checks. Two claims in the draft were wrong and were corrected there.
+
+**A requirement for Friday: pin the captures that matter with tests.** A capture records what was true on the day it was taken. If the backend later changes a message, a status or a field, the capture goes **stale silently**, and the contract goes on showing the old response with full confidence. A test **fails when the code drifts**.
+
+The contract's one hand-written example, the 409 for a stale write, is the model: `GlobalExceptionHandlerTest` asserts its status, code and message. Friday's tests should do the same for the responses a client depends on:
+- the 401 and 403 bodies
+- the identical 404 for a hidden and a missing ticket
+- the validation messages
+- the output-only refusals
+- the Ticket and User shapes, including `role`
+- the envelope
+
+**Login timing, measured while checking the contract.** POST /auth/login was timed for three cases, five requests each, median taken:
+
+| Case | Median |
+| --- | --- |
+| Unknown email | 89.3 ms |
+| Known email, wrong password | 89.1 ms |
+| Right password | 92.6 ms |
+
+The passwords are hashed with **BCrypt at cost factor 10** (`new BCryptPasswordEncoder()`, Spring Security's default; the stored hashes start `$2a$10$`), so each check is 2¹⁰ rounds. That's what dominates the time. The unknown-email case costs the same because `AuthService` checks the password against a dummy hash when there's no such user.
+
+**What the numbers show, and what they don't.** These three medians show **no gross timing difference** between an unknown email and a wrong password, so the response time doesn't obviously reveal which emails have accounts. They do **not** show that login is constant-time. That would take a distribution: many samples per case, under realistic load, and a statistical comparison. A difference smaller than the noise of five requests on a development machine would not show up here. The contract claims only that both cases "take about as long", which is what was measured.
+
 ### Comments in `AppUser` that this week makes wrong
 
 Two comments in `AppUser.java` say things arrive in **Week 8**: the password hash, and the `409 CONFLICT` for registering a taken email. Both arrive tomorrow, in Week 7, so both comments become wrong. They're fixed as part of Tuesday's work, not separately.
