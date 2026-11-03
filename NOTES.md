@@ -769,6 +769,111 @@ All are matched exactly, so `status=open` and `sort=priority,DESC` are both 400s
 
 **`DESC` will be the first thing someone tries.** Spring Data's own `Sort` parameter accepts `DESC` and `desc` alike, and so do most APIs built on it. Someone used to that will send `sort=priority,DESC` and get a 400. The example has to show the lowercase form, and the 400's message already does. Accepting both was considered and left out for consistency with every other fixed value here, which is exact. Relaxing it later would break nobody.
 
+### 49. The ticket shape gains the people on it and its version, as flat, output-only fields
+
+**Why a name has to be in the shape.** Exposing `assigneeId` alone would cost nothing: a lazy proxy already holds its id. But it would be useless to most callers. `GET /users` is ADMIN and MANAGER only, so an AGENT, who sees every ticket, couldn't turn an assignee id into a person. So the shape carries a name.
+
+**The fields.** Every ticket response gains:
+- `assigneeId`, `assigneeName`: both null when the ticket is unassigned
+- `createdById`, `createdByName`: always set
+- `version`
+
+**The decisions:**
+- **Flat, not nested** (`{"assignee": {"id": 4, "name": "Liam"}}`).
+  - The assign endpoint already takes `{"assigneeId": n}`, so the same name means the same thing in and out.
+  - The rest of the ticket shape is flat, and so is the frontend's `Ticket` type.
+  - Nested would buy one `null` for "unassigned" instead of two. That's small, because "both null or both set" is one sentence. A nested object, with an `id` inside, is also exactly what a full-form client would echo back as an assign that looks legitimate (decision 40).
+- **Name only, no email.** An email would tell apart two people with the same name, and give a way to contact them. The id already disambiguates for software, and contact isn't this endpoint's job. And email is the **login identifier**: putting it on every ticket would give every AGENT and USER half a credential for everyone on the tickets they can see.
+- **`createdBy` gets the same treatment.** The ownership rules hinge on the creator, and the UI needs "raised by". For a USER it's always herself, since she only sees her own tickets. That's redundant but harmless, and one shape for every role means no role-dependent fields.
+- **`version` in the body, not an ETag.** An ETag is one header per response, so a list of 20 tickets can't carry 20. The field has to be in the body regardless, and Friday's tests read it there. An ETag on `GET /tickets/{id}` can be added alongside it if `If-Match` ever arrives (decision 40).
+
+**All five are refused on input,** on `POST /tickets` and `PATCH /tickets/{id}`, with a 400 `VALIDATION_ERROR` on the field. That's decision 40's one rule, using the shape's real names. Decision 40 wrote `createdBy` before the shape existed; the fields are `createdById` and `createdByName`. `id` stays ignored, as the contract says. That's the one exception left for the contract rewrite to settle.
+- **Each field is a `JsonNode` with `@Refused`, not an `Object`.** Jackson gives an explicit `"assigneeId": null` a `NullNode`, but gives an `Object` field plain `null`, the same as "not sent". `{"assigneeId": null}` is how a client would try to unassign, and it must be refused, not answered with a 200 that did nothing.
+- **Tested** (`TicketOutputOnlyFieldsTest`, through real HTTP with a real login token):
+  - Daniel (AGENT) sending `{"assigneeId": <Liam>}` on his own ticket gets **400**, and the row's assignee is unchanged.
+  - `{"assigneeId": null}` gets **400**, and the row is unchanged.
+  - `{"title": …, "version": 0}` gets **400**, and neither the title nor the version moves.
+  - Claiming an unassigned ticket gets **403**, from the interceptor, before the body (decision 22). The row is still unassigned.
+- **Against the previous request record,** where the fields weren't declared, the first three failed with `expected:<400> but was:<200>`: silently ignored. The 403 case passed both times, because that rule already existed.
+
+### 50. What the shape exposes, and why it's narrower than the user list
+
+**What's new.** An AGENT and a USER now learn the **id and name** of every person who created, or is assigned, a ticket they can see. Before, only ADMIN and MANAGER could see any other user, through `GET /users`.
+
+**Why that's acceptable:**
+- **`GET /users` gives everyone, with email, username, role and contact details.** This gives names only, and only of people connected to tickets the caller can already see.
+- **A USER sees only her own tickets,** so she learns her own name and the names of the people working them. Being told who is handling your ticket is part of a helpdesk.
+- **An AGENT sees every ticket,** so in practice he learns the names of everyone active on them. That's names only, of colleagues he already works alongside.
+
+**One inference to note.** Anyone who appears as an *assignee* is not a USER, because USERs can't be assigned (decision 37). That's a small role leak. It's accepted: the people who can assign already learn roles from the assign endpoint's messages, and "this person works tickets" is visible from the work itself.
+
+**It stays acceptable while** the shape carries names and ids only. Adding email, role or contact details to it would need this argument made again.
+
+### 51. The N+1: a broken feature, not a slow one. `open-in-view` stays off, and the fix is fetch joins
+
+**Measured** for `GET /tickets?size=20` as Priya (12 tickets):
+
+| State | Result |
+| --- | --- |
+| Names exposed, no fetch, `open-in-view` off (the real configuration) | **500**: `LazyInitializationException: Could not initialize proxy [com.opsdesk.backend.user.AppUser#2] - no session` |
+| The same, measured with `open-in-view` on | **8 SELECTs**: the caller, the page, then 6 for users, one per distinct person |
+| After the fix | **2 SELECTs**: the caller (the token filter), then the page, with the assignee and creator joined |
+| After the fix, `?size=5` (a full first page, so the COUNT runs) | **3 SELECTs** |
+
+The single-ticket endpoints kept their counts from decision 38 (GET 2, PATCH 3, assign 4, unassign 3), with the users now joined into the ticket's query. The permission walk passed 55 of 55 and 20 of 20.
+
+**Why 6, not 12 or 24.** The persistence context loads each person **once per request**, however many tickets point to them. The page's 12 tickets have 6 distinct creators, and the 4 assignees are all among them. So the "N" is **distinct people on the page**, at most 2 per ticket. The worst case is 1 + 1 + 2N: 42 SELECTs for a full page of 20 if every creator and assignee were different. The seed data makes it look smaller than it is.
+
+**With `open-in-view` off, this was broken, not slow.** Every endpoint that maps a ticket returned a 500: the list, `GET /tickets/{id}`, `PATCH`, and both assignee endpoints. Create was the exception, because its creator is the caller's real object, not a proxy.
+
+**`open-in-view` stays off. It is not the fix.** Turning it on makes the 500 go away by running the missing queries quietly during the response. A missing fetch stops being a deterministic failure and becomes a hidden query: the same 8 SELECTs, invisible until someone counts them.
+
+**The fix:**
+- **The list:** a Specification in `TicketQueriesImpl` (`withPeople`) that left-joins the assignee and creator, guarded for the COUNT (decision 52). Both are to-one, so the joins add columns, never rows. Paging stays in SQL, and Hibernate logged no "applying in memory" warning.
+- **The `findById` paths:** `@EntityGraph(attributePaths = {"assignee", "createdBy"})` on the `findById` *declared* on the bare `Repository`. Spring Data reads annotations on declared CRUD methods, so this needs no `JpaRepository`. Every single-ticket path goes through it: GET, PATCH, assign, unassign and the interceptor.
+
+### 52. The COUNT-query trap: a fetch in a Specification breaks the count, and hid at `?size=20`
+
+**What happened.** The first version of `withPeople` fetched without a guard. `SimpleJpaRepository` runs the same Specification for the COUNT behind a page's totals. The count selects `count(t)`, not the ticket, so the fetched assignee has no owner to attach to, and Hibernate 7 rejects the whole query:
+```
+org.springframework.dao.InvalidDataAccessApiUsageException: org.hibernate.query.SemanticException:
+Query specified join fetching, but the owner of the fetched association was not present in the select list
+[SqmSingularJoin(com.opsdesk.backend.ticket.Ticket(var_1).assignee(var_1_1) : assignee)]
+```
+It's invalid, not silently wrong, and the client got a 500.
+
+**It hid completely at `?size=20`.** Spring Data skips the COUNT when a first page comes back less than full, because it already knows the total. Priya's 12 tickets on a page of 20 never ran it, so that request answered 200. Only `?size=5`, a full first page, exposed it.
+
+**The guard.** Skip the fetch when `query.getResultType()` is `Long`, which means it's the count. The count needs no users. It still carries the visibility condition from `where()`, as measured: `select count(t1_0.id) from ticket t1_0 where t1_0.created_by_id=?`, with no join.
+
+**A requirement for Friday's tests.** At least one list test must use a page size **smaller than the seeded data**, so the first page is full and the COUNT runs. Otherwise the count query is never exercised, and this whole class of bug passes every test. Better still, test a second page as well, which always runs the count.
+
+### 53. Mapping stays in the controller, outside the transaction
+
+**The decision.** `TicketResponse.from` runs in the controller, after the service's transaction has ended, with `open-in-view` off. The response reads the assignee's and creator's names, so the query that loaded the ticket must have fetched them. If one ever doesn't, the mapping throws `LazyInitializationException`: a 500 on that endpoint, every time.
+
+**The rejected alternative: mapping inside the transaction** (in the service, or with `open-in-view` on). It never crashes. That's the problem: a missing fetch quietly becomes one extra query per person, and the N+1 creeps back where nobody sees it. A deterministic 500 is a better signal than a slow page.
+
+**The condition that makes this safe.** The crash only reaches production on an endpoint that no test calls. So **every endpoint that returns a ticket needs a test that calls it**: list, single, create, edit, assign and unassign. That makes full endpoint coverage in Friday's tests a requirement, not a nicety.
+
+### 54. The caller's row is read twice per request: accepted
+
+**What happens.** The token filter loads the caller by email (decision 28 is why it reads the database at all: the stored role, not the token's). When a ticket she created is then loaded, her row comes back again: today as joined columns in the ticket query. Before the fetch joins, it was a SELECT by id of its own.
+
+**Why.** The filter's lookup runs in its own persistence context, which has ended before the request's own one starts, so Hibernate can't reuse the object.
+
+**Why it's accepted.** It's one constant query per request, not one per row. After the fix, the only cost is the filter's own query. It's noted here and in `JwtAuthFilter`, so nobody rediscovers it as a bug.
+
+### 55. The creator's inner join in `findById`, and how a missing creator would fail
+
+**What Hibernate does.** For the `findById` entity graph, Hibernate joins the creator with an **inner** join, because `createdBy` is `optional = false`. The assignee gets a left join. The list's `withPeople` asks for LEFT on both explicitly.
+
+**What would happen if a creator row went missing:**
+- **`GET /tickets/{id}`** would find no row and answer **404**, as if the ticket didn't exist. That's a quiet failure, and it runs against the loud-failure principle the rest of this design follows.
+- **The list** would return the row with a null creator, and `TicketResponse.from` would throw: a 500, the loud one.
+
+**Why it's left as it is.** It can't happen. `created_by_id` is NOT NULL with a foreign key to `app_user`, so the database refuses to delete a user who created tickets, and refuses a ticket without a creator. It's recorded because it's the one place where a broken invariant would hide instead of crash. If the foreign key is ever relaxed (for example, to let users be deleted), revisit it: make the join LEFT, so the missing creator fails loudly in the mapping instead.
+
 ### Comments in `AppUser` that this week makes wrong
 
 Two comments in `AppUser.java` say things arrive in **Week 8**: the password hash, and the `409 CONFLICT` for registering a taken email. Both arrive tomorrow, in Week 7, so both comments become wrong. They're fixed as part of Tuesday's work, not separately.
