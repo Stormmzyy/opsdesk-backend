@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# DEVELOPMENT ONLY. Walks every row of NOTES.md decision 27's checks table
+# against a running local backend, logging in as the seeded users with the
+# seeded development password (devpassword123; README.md, "Development
+# password"). Never point it at anything but a seeded development database.
+#
+# Usage, from the project root, with the app running on localhost:8080:
+#     bash scripts/week7-permission-walk.sh
+# Needs bash, curl, and docker (it reads rows with psql inside opsdesk-db).
+#
+# Each request states the status code decision 27 expects and prints PASS or
+# FAIL; the script exits non-zero if anything failed. Friday's tests are meant
+# to turn these same requests and expectations into automated tests.
+#
+# It restores everything it changes, following decision 27's three rules:
+#   - the ADMIN delete is proved on a ticket the walk creates, never a seeded one
+#   - edits change the title, never #4's status, so #4 stays OPEN
+#   - assigning #2 runs after the AGENT edit checks, and #2 is put back to
+#     unassigned afterwards
+# Every changed title is put back, and every ticket it creates is deleted.
+#
+# One thing it can't put back: the ticket id sequence. Ids are never reused
+# (decision 1), so each run consumes four ids, and the tickets it creates are
+# #13 to #16 only on a freshly created database. The script reads every
+# created id from the response instead of assuming it, and Friday's tests
+# must do the same.
+#
+# Some cells can only be proved from the database row, because the API's
+# ticket has no assigneeId or createdBy field; those print the row as well.
+
+A=http://localhost:8080/api/v1
+J='Content-Type: application/json'
+tok() { curl -s -H "$J" -X POST $A/auth/login -d "{\"email\":\"$1\",\"password\":\"devpassword123\"}" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p'; }
+PRIYA=$(tok priya.sharma@opsdesk.com); KWAME=$(tok kwame.asante@opsdesk.com)
+DANIEL=$(tok daniel.mensah@opsdesk.com); FATIMA=$(tok fatima.bello@opsdesk.com)
+if [ -z "$PRIYA" ] || [ -z "$KWAME" ] || [ -z "$DANIEL" ] || [ -z "$FATIMA" ]; then
+  echo "Could not log in as the seeded users. Is the app running against a seeded database?" >&2
+  exit 2
+fi
+sql() { docker exec opsdesk-db psql -U opsdesk -tAc "$1"; }
+n=0; failures=0
+# r "label" EXPECTED_STATUS TOKEN|- METHOD PATH [BODY]
+r() {
+  n=$((n+1)); local label=$1 want=$2 t=$3 m=$4 p=$5 b=$6 auth=()
+  [ "$t" != "-" ] && auth=(-H "Authorization: Bearer $t")
+  if [ -n "$b" ]; then
+    code=$(curl -s -o /tmp/walk_body -w '%{http_code}' "${auth[@]}" -H "$J" -X "$m" "$A$p" -d "$b")
+  else
+    code=$(curl -s -o /tmp/walk_body -w '%{http_code}' "${auth[@]}" -X "$m" "$A$p")
+  fi
+  BODY=$(cat /tmp/walk_body)
+  local verdict=PASS; [ "$code" != "$want" ] && { verdict=FAIL; failures=$((failures+1)); }
+  printf '\n[%02d] %s  %s (expected %s)\n     > %s /api/v1%s %s\n     < %s %s\n' \
+    "$n" "$verdict" "$label" "$want" "$m" "$p" "$b" "$code" "$(echo "$BODY" | cut -c1-170)"
+}
+check() { # check "label" "actual" "expected": for facts read from the database
+  local verdict=PASS; [ "$2" != "$3" ] && { verdict=FAIL; failures=$((failures+1)); }
+  printf '     %s  %s: %s (expected %s)\n' "$verdict" "$1" "$2" "$3"
+}
+ids() { echo "$BODY" | grep -oE '"id":[0-9]+,"title"' | grep -oE '[0-9]+' | tr '\n' ' ' | sed 's/ $//'; }
+assignee_of() { sql "select coalesce(assignee_id::text,'NULL') from ticket where id=$1"; }
+
+echo "################ JSON type strictness: every body field is type-checked, nothing is coerced"
+r "title sent as a number"    400 "$PRIYA" POST /tickets '{"title":5,"description":"x","priority":"LOW","team":"HR"}'
+r "priority sent as a number" 400 "$PRIYA" POST /tickets '{"title":"Strict","description":"x","priority":3,"team":"HR"}'
+
+echo; echo "################ VIEW"
+r "View all: ADMIN"     200 "$PRIYA"  GET /tickets; check "ids" "$(ids)" "1 2 3 4 5 6 7 8 9 10 11 12"
+r "View all: MANAGER"   200 "$KWAME"  GET /tickets; check "ids" "$(ids)" "1 2 3 4 5 6 7 8 9 10 11 12"
+r "View all: AGENT"     200 "$DANIEL" GET /tickets; check "ids" "$(ids)" "1 2 3 4 5 6 7 8 9 10 11 12"
+r "View own only: USER" 200 "$FATIMA" GET /tickets; check "ids" "$(ids)" "4 9"
+r "USER, someone else's ticket (decision 23: 404, not 403)" 404 "$FATIMA" GET /tickets/2; HIDDEN=$BODY
+r "USER, a ticket that doesn't exist"                       404 "$FATIMA" GET /tickets/999; MISSING=$BODY
+check "the two 404 bodies, ids masked" "$(echo "$HIDDEN" | sed 's/[0-9]\+/N/g')" "$(echo "$MISSING" | sed 's/[0-9]\+/N/g')"
+
+echo; echo "################ EDIT (titles changed, then restored)"
+r "ADMIN edits any (#3)"                  200 "$PRIYA"  PATCH /tickets/3 '{"title":"Walk: Priya edited #3"}'
+r "  restore #3"                          200 "$PRIYA"  PATCH /tickets/3 '{"title":"Customer cannot reset their password"}'
+r "MANAGER edits any (#2)"                200 "$KWAME"  PATCH /tickets/2 '{"title":"Walk: Kwame edited #2"}'
+r "  restore #2"                          200 "$KWAME"  PATCH /tickets/2 '{"title":"Order new laptops for the March starters"}'
+r "AGENT edits assigned (#1), title"      200 "$DANIEL" PATCH /tickets/1 '{"title":"Walk: Daniel edited #1"}'
+r "  restore #1"                          200 "$DANIEL" PATCH /tickets/1 '{"title":"Login page times out on slow networks"}'
+r "AGENT edits assigned (#1), status"     200 "$DANIEL" PATCH /tickets/1 '{"status":"IN_PROGRESS"}'
+r "  restore #1 status"                   200 "$DANIEL" PATCH /tickets/1 '{"status":"OPEN"}'
+r "AGENT, assigned to nobody (#6)"        403 "$DANIEL" PATCH /tickets/6 '{"title":"Walk"}'
+r "AGENT, assigned to someone else (#3)"  403 "$DANIEL" PATCH /tickets/3 '{"title":"Walk"}'
+r "USER, own and OPEN (#4), title"        200 "$FATIMA" PATCH /tickets/4 '{"title":"Walk: Fatima edited #4"}'
+r "  restore #4"                          200 "$FATIMA" PATCH /tickets/4 '{"title":"Update the holiday policy document"}'
+r "USER, own OPEN (#4), status"           403 "$FATIMA" PATCH /tickets/4 '{"status":"IN_PROGRESS"}'
+r "USER, own OPEN (#4), priority"         403 "$FATIMA" PATCH /tickets/4 '{"priority":"HIGH"}'
+r "USER, own OPEN (#4), team"             403 "$FATIMA" PATCH /tickets/4 '{"team":"Support"}'
+r "USER, own but not OPEN (#9)"           403 "$FATIMA" PATCH /tickets/9 '{"title":"Walk"}'
+r "USER, not own (#2): can't see it"      404 "$FATIMA" PATCH /tickets/2 '{"title":"Walk"}'
+check "#4 after the edits" "$(sql "select status||' / '||priority||' / '||team||' / '||title from ticket where id=4")" "OPEN / LOW / HR / Update the holiday policy document"
+
+echo; echo "################ ASSIGN AND UNASSIGN (after the AGENT edit checks; #2 put back afterwards)"
+r "AGENT assigns (#1 to Marco)"   403 "$DANIEL" PATCH /tickets/1/assignee '{"assigneeId":6}'
+check "#1 assignee unchanged" "$(assignee_of 1)" "2"
+r "USER assigns (#4 to Daniel)"   403 "$FATIMA" PATCH /tickets/4/assignee '{"assigneeId":2}'
+r "AGENT unassigns (#1)"          403 "$DANIEL" DELETE /tickets/1/assignee
+check "#1 assignee unchanged" "$(assignee_of 1)" "2"
+r "USER unassigns (#4)"           403 "$FATIMA" DELETE /tickets/4/assignee
+r "ADMIN assigns #2 to Liam"      200 "$PRIYA"  PATCH /tickets/2/assignee '{"assigneeId":4}'
+check "#2 assignee (row)" "$(assignee_of 2)" "4"
+r "  put #2 back"                 200 "$KWAME"  DELETE /tickets/2/assignee
+check "#2 assignee (row)" "$(assignee_of 2)" "NULL"
+r "MANAGER assigns #2 to Liam"    200 "$KWAME"  PATCH /tickets/2/assignee '{"assigneeId":4}'
+check "#2 assignee (row)" "$(assignee_of 2)" "4"
+r "  put #2 back"                 200 "$KWAME"  DELETE /tickets/2/assignee
+check "#2 assignee (row)" "$(assignee_of 2)" "NULL"
+
+echo; echo "################ CREATE (createdBy is checked in the database)"
+created_id() { echo "$BODY" | sed -n 's/^{"id":\([0-9]*\).*/\1/p'; }
+creator_of() { sql "select created_by_id from ticket where id=$1"; }
+r "Create: ADMIN"   201 "$PRIYA"  POST /tickets '{"title":"Walk ticket by Priya","description":"x","priority":"LOW","team":"HR"}';  T_PRIYA=$(created_id)
+check "#$T_PRIYA created_by_id (row)" "$(creator_of "$T_PRIYA")" "1"
+r "Create: MANAGER" 201 "$KWAME"  POST /tickets '{"title":"Walk ticket by Kwame","description":"x","priority":"LOW","team":"HR"}';  T_KWAME=$(created_id)
+check "#$T_KWAME created_by_id (row)" "$(creator_of "$T_KWAME")" "3"
+r "Create: AGENT"   201 "$DANIEL" POST /tickets '{"title":"Walk ticket by Daniel","description":"x","priority":"LOW","team":"HR"}'; T_DANIEL=$(created_id)
+check "#$T_DANIEL created_by_id (row)" "$(creator_of "$T_DANIEL")" "2"
+r "Create: USER, sending createdBy 1 (Priya), which must be ignored" 201 "$FATIMA" POST /tickets '{"title":"Walk ticket by Fatima","description":"x","priority":"LOW","team":"HR","createdBy":1}'; T_FATIMA=$(created_id)
+check "#$T_FATIMA created_by_id (row)" "$(creator_of "$T_FATIMA")" "5"
+r "  USER's list now includes her new ticket" 200 "$FATIMA" GET /tickets; check "ids" "$(ids)" "4 9 $T_FATIMA"
+
+echo; echo "################ DELETE"
+r "MANAGER deletes (#2)" 403 "$KWAME"  DELETE /tickets/2
+r "AGENT deletes (#1)"   403 "$DANIEL" DELETE /tickets/1
+r "USER deletes (#4)"    403 "$FATIMA" DELETE /tickets/4
+r "ADMIN deletes a ticket created during the test (#$T_PRIYA)" 204 "$PRIYA" DELETE /tickets/$T_PRIYA
+r "  and it's gone"      404 "$PRIYA"  GET /tickets/$T_PRIYA
+
+echo; echo "################ LIST USERS"
+r "List users: ADMIN"   200 "$PRIYA"  GET /users; check "users returned" "$(echo "$BODY" | grep -o '"username"' | wc -l | tr -d ' ')" "6"
+r "List users: MANAGER" 200 "$KWAME"  GET /users; check "users returned" "$(echo "$BODY" | grep -o '"username"' | wc -l | tr -d ' ')" "6"
+r "List users: AGENT"   403 "$DANIEL" GET /users
+r "List users: USER"    403 "$FATIMA" GET /users
+
+echo; echo "################ THE EASY-TO-MISS ONES"
+r "No token, where a valid MANAGER token gives 403"      401 -        DELETE /tickets/2
+r "/tickets/999, gate refuses before the lookup: MANAGER" 403 "$KWAME"  DELETE /tickets/999
+r "/tickets/999, gate passes: ADMIN"                     404 "$PRIYA"  DELETE /tickets/999
+r "/tickets/999/assignee, gate refuses: USER"            403 "$FATIMA" PATCH /tickets/999/assignee '{"assigneeId":2}'
+r "/tickets/999/assignee, gate passes: MANAGER"          404 "$KWAME"  PATCH /tickets/999/assignee '{"assigneeId":2}'
+
+echo; echo "################ CLEAN-UP: the ADMIN deletes the other tickets the walk created"
+for t in $T_KWAME $T_DANIEL $T_FATIMA; do r "  delete #$t" 204 "$PRIYA" DELETE /tickets/$t; done
+check "tickets left" "$(sql "select count(*) from ticket")" "12"
+
+echo
+if [ "$failures" -eq 0 ]; then
+  echo "All checks passed ($n requests)."
+else
+  echo "$failures check(s) FAILED ($n requests)." >&2
+  exit 1
+fi
