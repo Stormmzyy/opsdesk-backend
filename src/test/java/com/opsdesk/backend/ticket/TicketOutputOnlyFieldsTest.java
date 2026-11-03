@@ -17,6 +17,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 // Boot 3: org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc.
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 
@@ -34,18 +35,16 @@ import com.opsdesk.backend.user.AppUserRepository;
 //
 // Through the real HTTP stack, with a real token from POST /auth/login, so
 // the security filter, the interceptor's check order (decision 22) and
-// validation all run as in production. Against the dev PostgreSQL, in a
-// schema of its own that is created, seeded and dropped by this test, so
-// the dev data is never touched.
+// validation all run as in production. Against the test profile's in-memory
+// H2 (NOTES.md, decision 62), built and seeded when the context starts.
+// @AutoConfigureMockMvc makes this a different Spring context from the
+// other database tests, so it gets a database of its own.
 //
 // Every test also reads the row back afterwards: a 400 that still let the
 // change through would be worse than no check at all.
-@SpringBootTest(properties = {
-        "spring.jpa.properties.hibernate.default_schema=output_fields_test",
-        "spring.jpa.properties.hibernate.hbm2ddl.create_namespaces=true",
-        "spring.jpa.hibernate.ddl-auto=create-drop"
-})
+@SpringBootTest
 @AutoConfigureMockMvc
+@ActiveProfiles("test")
 class TicketOutputOnlyFieldsTest {
 
     private static final String DANIEL = "daniel.mensah@opsdesk.com";

@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.domain.Sort;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -35,15 +36,23 @@ import com.opsdesk.backend.user.AppUserRepository;
 // started and committed explicitly, so B's change is really in the database
 // before A tries to write.
 //
-// It runs against the dev PostgreSQL, like contextLoads, but in its own
-// schema, created when the test starts and dropped when it ends. The dev data
-// is never touched, and the table is built from the Ticket class under test,
-// whatever that class looks like.
-@SpringBootTest(properties = {
-        "spring.jpa.properties.hibernate.default_schema=lost_update_test",
-        "spring.jpa.properties.hibernate.hbm2ddl.create_namespaces=true",
-        "spring.jpa.hibernate.ddl-auto=create-drop"
-})
+// It runs on the test profile's in-memory H2 (NOTES.md, decision 62), with
+// the table built from the Ticket class under test, whatever that class
+// looks like. Until decision 62 it ran in a throwaway schema inside the dev
+// PostgreSQL; the in-memory database is throwaway as a whole, so that trick
+// is gone.
+//
+// It still proves the fix on H2 because the check is Hibernate's, not the
+// database's: Hibernate adds "and version = ?" to the UPDATE and treats 0
+// rows changed as a conflict. The database only has to count rows, and to
+// show A's UPDATE what B committed, which H2 does at its default isolation,
+// READ COMMITTED, the same as PostgreSQL's.
+//
+// The two transactions are two connections from the pool, both to the same
+// in-memory database: the pool opens every connection with the one URL its
+// context resolved at startup.
+@SpringBootTest
+@ActiveProfiles("test")
 class TicketLostUpdateTest {
 
     @Autowired
@@ -58,7 +67,10 @@ class TicketLostUpdateTest {
     private Long ticketId;
 
     // A fresh OPEN ticket for each test, created by any seeded user. The id
-    // is taken from the saved ticket, never assumed.
+    // is taken from the saved ticket, never assumed. It's deleted afterwards
+    // because the database is shared with every other test in the same
+    // Spring context (contextLoads, today), and they expect decision 27's
+    // twelve tickets and nothing else.
     @BeforeEach
     void createTicket() {
         AppUser creator = appUserRepository.findAll(Sort.by("id")).getFirst();

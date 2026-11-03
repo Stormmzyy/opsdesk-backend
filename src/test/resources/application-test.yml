@@ -1,0 +1,35 @@
+# The test profile (NOTES.md, decision 62). Read only when the "test" profile
+# is active, which every Spring test turns on with @ActiveProfiles("test").
+# Layered over src/main/resources/application.yml, so only what differs is
+# here; the JWT settings still come from there. It's in src/test, so it never
+# reaches the built jar and can't change how the app itself runs.
+#
+# H2 in PostgreSQL compatibility mode is NOT PostgreSQL. A query that works
+# here can still break on the real database, and the other way round. This
+# profile lets the suite prove the logic without a database running;
+# scripts/week7-permission-walk.sh is the only thing that runs against real
+# PostgreSQL, so it's part of done for any change.
+spring:
+  datasource:
+    # mem: lives only in this JVM's memory, never on disk.
+    # ${random.uuid}: a new database for each Spring context. Spring keeps
+    #   several test contexts alive at once (one per distinct test setup);
+    #   with a fixed name they would share one database, and each one's
+    #   create-drop would rebuild the tables under the others.
+    # DB_CLOSE_DELAY=-1: keep the database until the JVM exits, instead of
+    #   dropping it the moment the last connection closes.
+    # MODE=PostgreSQL: accept PostgreSQL's syntax and behave like it where H2
+    #   can. Partly: see decision 62 for what still differs.
+    # DATABASE_TO_LOWER=TRUE: fold unquoted names to lower case, as
+    #   PostgreSQL does (H2's own default is upper case).
+    # DEFAULT_NULL_ORDERING=HIGH: nulls sort last in ascending order, as in
+    #   PostgreSQL (H2's own default puts them first).
+    url: jdbc:h2:mem:${random.uuid};DB_CLOSE_DELAY=-1;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      # Every table built from the entities when the context starts, and
+      # dropped when it closes. The seeder then fills it with decision 27's
+      # rows, exactly as it does on an empty PostgreSQL.
+      ddl-auto: create-drop
