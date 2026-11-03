@@ -165,10 +165,15 @@ Authentication answers "who are you?" by checking the caller's identity, while a
 
 On Windows Command Prompt or PowerShell, use `mvnw.cmd test`.
 
-| Test | Needs the database? |
-| --- | --- |
-| `OpsdeskBackendApplicationTests` (`contextLoads`) | **Yes.** It starts the whole application, including the database connection and the seeder. Start `opsdesk-db` first. |
-| `TicketServiceTest` | No. It tests `TicketService` on its own, with the repository replaced by a Mockito mock. |
+None of the tests need PostgreSQL or Docker. The ones that start the application (`contextLoads`, `TicketLostUpdateTest`, `TicketOutputOnlyFieldsTest`) run on the `test` profile, `src/test/resources/application-test.yml`. That's an in-memory H2 database, built from the entities and seeded at startup, and gone when the run ends. Every new Spring test needs `@ActiveProfiles("test")`, or it connects to `opsdesk-db` instead. `TestProfileShapeTest` fails the build if one doesn't have it.
+
+H2 is not PostgreSQL, so the tests prove the logic, not the SQL against the real database ([NOTES.md](NOTES.md), decision 62). The one check against real PostgreSQL is the permission walk. It covers the permission table and the list's filters, sorts, search and paging. With `opsdesk-db` and the app running:
+
+```sh
+bash scripts/week7-permission-walk.sh
+```
+
+A change is done when `./mvnw test` is green **and** the walk passes.
 
 ## Design notes
 

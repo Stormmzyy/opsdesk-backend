@@ -1014,6 +1014,51 @@ The passwords are hashed with **BCrypt at cost factor 10** (`new BCryptPasswordE
 
 **What it doesn't prove.** It checks that a method *takes* the caller, not that it *uses* her for visibility. A method that accepts an `AppUser` and ignores it would pass. That's still a review question, made much narrower: today every such method goes through `getVisibleTicket` or `findVisible`.
 
+### 62. The tests run on H2 in memory. The walk is the only check against real PostgreSQL, so it's part of done
+
+**What changed.** `./mvnw test` used to need the dev PostgreSQL running. `contextLoads` connected to it, and `TicketLostUpdateTest` and `TicketOutputOnlyFieldsTest` each built a throwaway schema inside it. Now every Spring test runs with `@ActiveProfiles("test")`. That profile (`src/test/resources/application-test.yml`) points the app at an in-memory H2 database in PostgreSQL compatibility mode, built from the entities with `create-drop`. Each Spring context gets its own database, named with `${random.uuid}`, and the seeder fills it with decision 27's rows.
+
+The profile lives in `src/test`, so it never reaches the built jar. It's switched on by an annotation on each test, rather than Maven's surefire settings, because surefire only applies under `./mvnw`. A test run from IntelliJ would go to PostgreSQL without a word. The annotation is the same everywhere. A new Spring test that forgot it would use `application.yml`. With PostgreSQL stopped that fails at startup, which is loud. With PostgreSQL running, it would silently use the dev database.
+
+**`TestProfileShapeTest` closes that gap.** It's the third shape test, next to the repository and service ones. It scans every class under `com.opsdesk.backend` and finds each one JUnit runs with `SpringExtension`. That's the extension every Spring test annotation carries, so the check doesn't depend on a list of annotation names. It fails any of them that lacks `@ActiveProfiles("test")`. It also fails if the scan misses the three Spring tests known today, because an empty scan would pass while checking nothing. With the annotation removed from `TicketOutputOnlyFieldsTest`, it reported: `com.opsdesk.backend.ticket.TicketOutputOnlyFieldsTest starts a Spring context without @ActiveProfiles("test"), so it would connect to the dev PostgreSQL`.
+
+**The tradeoff.** H2 in PostgreSQL mode is **not** PostgreSQL. It also runs different SQL: Hibernate picks its H2 dialect, so even a query built from the same Criteria code is not the statement production sends. Where they can differ for this code:
+- **Identifier casing.** PostgreSQL folds unquoted names to lower case, H2 to upper. `DATABASE_TO_LOWER=TRUE` closes the gap for unquoted names.
+- **Collation in `lower()`.** PostgreSQL lower-cases by the database's locale; H2 uses Java's own rules. Search and the `title` sort both go through `lower()`, so a title with non-ASCII letters could match or order differently.
+- **Pagination syntax.** Each dialect writes its own limit and offset clause, so the paging SQL that runs in tests is not the paging SQL that runs in production.
+- **LIKE escaping.** Search names its escape character, `'\'`, explicitly in the query (decision 43), so both databases read the pattern the same way. That was done for correctness, and it also takes this difference off the table for search. Any new LIKE should do the same, rather than lean on each database's default.
+- **Null ordering.** PostgreSQL puts nulls last in ascending order; H2 puts them first. `DEFAULT_NULL_ORDERING=HIGH` matches PostgreSQL.
+- **Measured today, in H2's catalogue:**
+  - **H2 indexes every foreign key column by itself.** `ticket` has indexes on `project_id`, `assignee_id` and `created_by_id` that PostgreSQL never builds (decision 56 exists because it doesn't). `ix_ticket_created_by_id_id (created_by_id, id)` is there too, in that column order, so the declaration survives. But nothing about indexes or query plans can be learned from this suite.
+  - **The enum columns are H2's native `enum` type,** where PostgreSQL has `varchar` with a check constraint.
+  - **`title` and `description` are `character varying`,** where PostgreSQL has `text`. Unbounded in this mode, so nothing is truncated.
+
+A suite that's green on H2 can hide a query that breaks on PostgreSQL, and the reverse.
+
+**Testcontainers was the better answer on correctness, and lost.** It would start a real PostgreSQL 16 in Docker for the tests: the same engine, the same dialect, the same SQL as production, and none of the differences above. It loses because it needs Docker running wherever the tests run, and starting a database container makes every run much slower. The point of today was a suite that passes on a machine with nothing else running.
+
+**The consequence, plainly.** After today, the H2 suite proves the **logic**. `scripts/week7-permission-walk.sh` is the **only** thing that exercises real PostgreSQL. So the walk is part of the definition of done, not a convenience: **a change isn't done until `./mvnw test` is green and the walk passes against the app running on `opsdesk-db`.**
+
+**The walk covers the filter, sort and search surface. That's what makes the claim above true.** As first written, the walk sent no `search`, `sort` or filter, so the SQL H2 can't vouch for ran on real PostgreSQL in nothing automated. It now has a section for exactly that, run before the edits, while every title is the seeded one:
+- **Search as a USER,** so `lower()` and the visibility condition run together. Fatima's `search=HOLIDAY` returns only #4; the same search as the ADMIN returns #4 and #8.
+- **LIKE escaping.** A probe ticket titled `a 100% walk probe` is created, then deleted. `search=%` returns that probe alone, with `totalItems` 1. No seeded row contains `%` or `_`, so an unescaped pattern would have matched all of them.
+- **The CASE sorts, checked by the order of the ids, not only the status code.**
+  - Priority ascending and descending: descending also shows that ties stay in id-ascending order.
+  - Status descending: ascending is no test on this seed, because it equals the id order, so a sort that was ignored would pass it.
+- **The `lower()` sort by title.** The probe's lower-case first letter puts it first; a case-sensitive byte order would put it last. This database's collation (`en_US.utf8`) also ignores case at first, so this proves the order ignores case on PostgreSQL, not which of the two did it.
+- **A filtered page smaller than the match.** `priority=MEDIUM&size=3` matches 4 tickets. A full first page forces Spring Data to run the COUNT query, since `totalItems` 4 can't be read off three items. Then page 2 (the offset) and page 3 (past the last: no items, totals still 4 and 2).
+- **Three 400s:** `sort=createdBy.passwordHash`, an unknown parameter `colour`, and `status=BANANA`. Each is checked for the field it names, so a 400 for another reason doesn't pass.
+
+Every expected order is written out by hand from decision 27's rows, not computed by a query, so a wrong ORDER BY can't be copied into the expectation. The probe is deleted at the end of the section, so the walk still leaves 12 tickets, and each run now uses five ids rather than four.
+
+**What was proved.**
+- **No database needed.** With `opsdesk-db` stopped and nothing listening on port 5433, `./mvnw test` ran **14 tests, all passing**.
+- **The lost-update test still bites on H2.** With `@Version` and `@DynamicUpdate` removed from `Ticket`, both of its tests failed with "B's status change was overwritten". With them back, both pass.
+  - The ported test still runs two real transactions: `REQUIRES_NEW` takes a second connection from the pool, to the same in-memory database.
+  - The check is still Hibernate's: it adds `and version = ?` to the UPDATE and treats 0 rows changed as a conflict. H2's default isolation, READ COMMITTED, is the same as PostgreSQL's, so A's UPDATE sees what B committed.
+- **The real configuration is untouched.** The app started on the `default` profile and connected with `org.postgresql.jdbc.PgConnection`. The walk then passed: **55 of 55 requests, 20 of 20 checks.** With the new section it passes **70 of 70 requests and 37 of 37 checks.**
+- **With `TestProfileShapeTest` the suite is 15 tests,** all passing with PostgreSQL stopped.
+
 ### Comments in `AppUser` that this week makes wrong
 
 Two comments in `AppUser.java` say things arrive in **Week 8**: the password hash, and the `409 CONFLICT` for registering a taken email. Both arrive tomorrow, in Week 7, so both comments become wrong. They're fixed as part of Tuesday's work, not separately.
