@@ -63,6 +63,16 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 // applies from the next request. An account deleted since the
                 // token was issued finds nobody, so the request stays
                 // unauthenticated and gets a 401.
+                //
+                // NOT A BUG: the caller's row is often read twice per
+                // request, here by email and again when a ticket she created
+                // is loaded (today as joined columns in the ticket query;
+                // without the fetch joins it was a SELECT by id of its own).
+                // This lookup runs in its own persistence context, which has
+                // ended before the request's own one starts, so Hibernate
+                // can't reuse the object. It's one constant query per
+                // request, not one per row, so it's accepted (NOTES.md, the
+                // N+1 decision).
                 users.findByEmail(email).ifPresent(this::signIn);
             } catch (JwtException notValid) {
                 // A bad signature, an expired token, or not a token at all.

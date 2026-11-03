@@ -13,12 +13,10 @@ public class TicketNotFoundException extends NotFoundException {
 
     // Takes the id as text, not a Long, because the same message is used for
     // ids that aren't numbers at all ("abc"), and the contract quotes whatever
-    // was in the URL.
+    // was in the URL. There's deliberately no Long version: every lookup goes
+    // through TicketService.getVisibleTicket with the raw id from the URL, so
+    // a hidden ticket and a missing one get the same message (decision 35).
     public TicketNotFoundException(String rawId) {
         super("No ticket with id \"" + rawId + "\".");
-    }
-
-    public TicketNotFoundException(Long id) {
-        this(String.valueOf(id));
     }
 }

@@ -521,6 +521,39 @@ So if Kwame moves #4 to IN_PROGRESS between Fatima's read and her save, her titl
 - **`@DynamicUpdate` alone.** The detached merge copies the stale status onto the fresh row, so status still counts as changed and is still written. It only works together with the transactional load-and-modify, where "changed" means "changed by this request".
 - **Either of those without `@Version`.** They stop an unchanged column being overwritten, but not two people changing the *same* column. `@Version` catches that.
 
+**Accepted tradeoff: `@Version` conflicts on the row, not the column.** There is one version number for the whole ticket, and every UPDATE checks it, whichever columns it writes. So two requests that touch *different* columns of the same ticket still conflict. If Daniel moves #1, which is assigned to him, to IN_PROGRESS at the same moment as Kwame reassigns it, whichever commits second gets a **409**, even though `@DynamicUpdate` means the two UPDATEs would never have overwritten each other. `TicketLostUpdateTest` shows exactly this: a title-only write is refused because someone else changed the status.
+
+This is deliberate:
+- **The cost** is a false conflict on a rare race between two people working the same ticket. The loser reloads and tries again.
+- **The alternative is worse.** A per-column check (Hibernate's `OptimisticLockType.DIRTY`) would let those two through, but it would also let through changes that are only safe *together*. For example, an assign decided on the basis of a status that has since moved on. It also only works with `@DynamicUpdate` on every write, and it's much harder to reason about than one number per row.
+
+If false 409s ever show up in the WARN log often enough to matter, revisit it then, with the log as evidence.
+
+**Implemented on Thursday.** `Ticket` has `@Version` and `@DynamicUpdate`. `updateTicket` and `assignTicket` are `@Transactional`, so the ticket stays managed from load to commit. A stale write answers **409 `CONFLICT`** with a fixed message, and the detail is logged at WARN, like the 403.
+
+Measured with SQL logging. Fatima's title-only PATCH on #4:
+- Before: `update ticket set assignee_id=?, created_by_id=?, description=?, priority=?, project_id=?, status=?, team=?, title=? where id=?`
+- After: `update ticket set title=?,version=? where id=? and version=?`
+
+SELECTs per request:
+
+| Request | Before | After | What went |
+| --- | --- | --- | --- |
+| `PATCH /tickets/{id}` | 4 | 3 | the merge's re-read of the ticket |
+| `PATCH /tickets/{id}/assignee` | 5 | 4 | the merge's re-read |
+| `DELETE /tickets/{id}/assignee` | 4 | 3 | the merge's re-read |
+
+What's left for PATCH: the caller (by email), the ticket in the interceptor, and the ticket in the service. Assign adds the assignee by id. The interceptor's read is outside the service's transaction, so the ticket is read twice. That's harmless: the service re-checks `canEdit` and `canAssign` on its own copy, so a change between the two reads is judged against what the service is about to write. The permission walk passed 55 of 55 and 20 of 20 on a fresh database after the change.
+
+The assign path was already safe once `@Version` existed: merge compares the detached copy's version with the row's and throws. `@Transactional` there was for consistency and the query count.
+
+**The race test needs the dev PostgreSQL.** `TicketLostUpdateTest` runs against the dev PostgreSQL on port 5433, in a throwaway `lost_update_test` schema that it creates and drops. `./mvnw test` already needed that database for `contextLoads`, so the dependency isn't new, but it's now a real test rather than a smoke test. It is the test **most likely to resist Friday's H2 profile**, because what it proves is about real transactions:
+- two connections at once (`REQUIRES_NEW`)
+- one transaction's commit being visible to another that's already open
+- the schema properties it sets
+
+An in-memory H2 may lock, isolate or create schemas differently. This hasn't been tried. If it won't run on H2, keep it on PostgreSQL (or Testcontainers) rather than weaken it until it passes.
+
 ### 39. Decided now for Thursday: `assigneeId` on the ticket shape is readable on output and refused on input
 
 **The problem.** Thursday adds `assigneeId` to the ticket shape, because today no response can show who a ticket is assigned to (decision 27's assign cells could only be proved from the row). The obvious way to add a field is to read and write it everywhere. **If `assigneeId` binds on `PATCH /tickets/{id}`, it bypasses the assign endpoint and its ADMIN-or-MANAGER gate.** An AGENT may edit a ticket assigned to them, so they could send `{"assigneeId": <own id>}` on any ticket they're allowed to edit, or move one of theirs to someone else. Nothing would refuse it, because the edit rules don't know the field means assigning.
@@ -531,11 +564,455 @@ So if Kwame moves #4 to IN_PROGRESS between Fatima's read and her save, her titl
 - **Binding it on the ticket PATCH**, for the reason above.
 - **Silently ignoring it, as `createdBy` is.** A client has no legitimate way to set `createdBy`, so ignoring it hides nothing. A client sending `assigneeId` on the ticket PATCH is trying to assign, and there *is* a right way to do that. Ignoring it would answer 200 while not doing what was asked, and the client would find out later, if at all.
 
+  *Superseded by decision 40:* `createdBy` is now refused too, so all three output-only fields follow one rule.
+
 **Thursday's tests for it:**
 - An AGENT sends `PATCH /tickets/{id}` with `{"assigneeId": <someone else's id>}` on a ticket assigned to them. They get **400**, and the row's `assignee_id` is unchanged.
 - The same AGENT sends `{"assigneeId": <their own id>}` on a ticket assigned to nobody. They get **403**: they can't edit that ticket at all, and the interceptor refuses before the body is read (decision 33). The row's `assignee_id` is still NULL.
 
 Together these cover both ways the field could be abused: handing off a ticket they hold, and claiming one they were never given.
+
+**`version` joins it** on Thursday's contract change: on every ticket response, refused on input, for the reasons in decision 40.
+
+### 40. `@Version` only catches simultaneous writes. A stale full-form save can still silently revert other people's changes
+
+**What the guard compares.** `@Version` compares the version the **server** loaded with the row's version at the moment of writing. The server loads the ticket fresh at the start of each request, microseconds before it writes. So the guard fires only on **true simultaneity**: two requests whose load-to-commit windows overlap. That's what decision 38 closed, and what `TicketLostUpdateTest` proves.
+
+**The case it doesn't catch: a stale form.** Someone opens a ticket's edit form, someone else changes the ticket and saves, and minutes later the first person saves. The second request loads the ticket *after* the other commit, so the server sees no conflict. What happens next depends on the role, because the frontend's Edit page sends the **whole form** on every save. Every field the person didn't touch carries the value they *saw* when the page loaded, which may now be old.
+
+- **A USER is saved by the field restriction.** Fatima opens #4. Kwame changes its priority (or moves it on from OPEN). Fatima fixes the title and saves. Her form sends the old priority, which is now "present and different" (decision 34), so she gets a **403** and nothing is written. If Kwame moved the ticket out of OPEN, `canEdit` refuses her anyway. Either way, nothing is lost.
+
+  The answer misleads her, though: she's told she lacks permission when she only touched the title. Reloading shows why. Only a field she *may* change (title, description) can overwrite someone else's change silently, and only if they changed the same one.
+- **ADMIN, MANAGER and AGENT have no field restriction, and that is where the exposure is widest.** Daniel opens #1, which is assigned to him. Kwame moves it to IN_PROGRESS. Daniel fixes a typo in the title and saves. His form sends the status he saw, `OPEN`. It's different from the row's, so `@DynamicUpdate` counts it as a change, and **Kwame's status is silently reverted**, with no 409 and nothing in the log. That holds for every field, not just the one being edited. The exposure is widest for exactly the roles whose changes matter most, and what gets reverted is status, not just title.
+- **The same field, changed on purpose by both, is a genuine conflict for every role.** The later save wins silently.
+
+**There is no server-only fix.** A full-form PATCH is **ambiguous by construction**. When the body says `"status": "OPEN"`, the server can't tell "I want the status to be OPEN" from "the status was OPEN when my page loaded". Both are the same bytes. `@Version` and `@DynamicUpdate` are everything the backend can do alone. They stop two requests in flight from losing each other's writes (decision 38), but they can't recover an intent the request never carried.
+
+**What we can claim.** Concurrent requests can't lose each other's writes. A client can still save on top of a state it never saw, and from the full-form page, that can revert fields the person never meant to touch.
+
+**The preferred fix: the frontend sends only the fields that were changed.** The Edit page compares the form with the ticket as loaded, and PATCHes only the differences. Then:
+- **The stale-form revert disappears.** Daniel's typo fix sends only `title`, so Kwame's status is never in the request.
+- **Decision 34 can become the simpler "present at all".** "Present and different" existed only to keep the full-form page working for a USER. Once the page sends only changes, any `status`, `priority` or `team` in a USER's request is an attempt to change it, and can be refused as such.
+
+One change on the other side of the wire resolves both compromises. It needs no contract change to the request shape (a PATCH with fewer fields is already valid), only a frontend change, so it is raised with the frontend rather than made here.
+
+What it leaves is the genuine same-field conflict. That's the remaining case, and it's tolerable: both people meant to change that field, and the later one did.
+
+**The rejected alternative: `If-Match` (or a `version` field in the PATCH body).** The client sends back the version it read. The server compares it with the row instead of its own fresh load, and answers 409 when they differ. That closes even the same-field case. It loses on cost:
+- a contract change: an ETag or `version` on every response, and a rule for requests that omit it
+- the frontend storing the version and sending it back on every edit and assign
+- a "someone changed this, reload" screen
+
+That's a round of contract and frontend work, for a case that matters most on title and description, where a silent overwrite is annoying (someone retypes a sentence) rather than dangerous. Revisit it if a field arrives whose silent overwrite would be dangerous.
+
+**`version` goes on the ticket shape now, output-only, next to `assigneeId`** (decision 39). Without it in responses, nothing can ever send it back, so `If-Match` could never be added without another contract change. Friday's tests also can't read it, and they need to: versions only go up, and a restore is a write too, so the walk leaves them well above 0.
+
+On input, it's refused with a 400, not ignored. Two reasons:
+- **It doesn't pretend.** A client sending `version` on a PATCH believes it's asking for a conflict check. Ignoring it would answer 200 without doing what was asked: decision 39's own argument.
+- **It's forward compatible.** If `If-Match`-style checks ever arrive through a `version` field, relaxing a 400 into an accepted field breaks nobody, because no working client sends it. Ignoring it now would let clients get into the habit of sending it, harmlessly. On the day it started meaning something, they would suddenly get conflict checks, and 409s, they never asked for. A refusal keeps the field unused until it means something.
+
+**One rule for all three output-only fields.** `createdBy`, `assigneeId` and `version` appear in responses, and **every one of them is refused with a 400 on input**, on `POST /tickets` and `PATCH /tickets/{id}`. That's one rule in the contract instead of "refuse two, ignore one".
+
+This replaces decision 39's "ignore `createdBy`". The frontend was checked first (`opsdesk-frontend` main, `70dc092`), and nothing sends it:
+- **Create** sends the form's `TicketFormValues`.
+- **Edit** builds its form from exactly five named fields (title, description, priority, team, status), not by spreading a `Ticket`.
+- **The board's move** sends only `status`.
+
+So refusing it breaks no existing client. If the Edit page were ever changed to `{...ticket}`, it would now fail loudly with a 400, rather than quietly echoing server-owned fields back.
+
+**Found while checking: unknown fields are accepted silently today.** Measured against the running app:
+- `PATCH /tickets/12` with `{"titel": "..."}` (a typo in the key) answered **200** and changed nothing.
+- `{"version": 0}` and `{"createdBy": 5}` on a PATCH answered 200, ignored.
+- A `POST` carrying `createdBy`, `assigneeId` and `version` answered 201 with all three dropped.
+
+Nothing in this repo configures that. It's Spring Boot's auto-configured mapper, which doesn't fail on unknown properties, and nothing here overrides it. So `createdBy` was never "declared to be ignored": it's ignored because every unknown field is, typos included.
+
+**And the contract promises it.** Its Conventions section says: "Fields the server doesn't recognise in a request body are **ignored**, not rejected". `POST /tickets` says the same of `id` and `status`. So the silence is today's contract, not an accident of configuration. It's also decision 39's "answer 200 while not doing what was asked", for any misspelt key.
+
+**Two consequences for Thursday's contract rewrite:**
+- **Refusing the three output-only fields is an exception to that rule.** The rewrite must either name them as exceptions, or reverse the rule. It can't do neither.
+- **Reversing the rule is a change of status code** (200 → 400) for bodies that are accepted today. The contract's own versioning paragraph lists that as breaking. The frontend sends no unrecognised fields (checked above), so in practice it breaks nobody. It still has to be a deliberate decision in the rewrite, not something that slips in.
+
+If the rule is reversed, the likely way to do it:
+- Make the mapper fail on unknown properties.
+- Map that failure to `VALIDATION_ERROR` on the offending field's name, rather than letting it fall into the generic `BAD_REQUEST` ("The request body must be a JSON object."), which would be the wrong message.
+- `createdBy`, `assigneeId` and `version` then need no code of their own: they're unknown to the request records. Each gets a message that names the right way to do the thing, such as the assign endpoint for `assigneeId`.
+
+Not done yet: it's part of the contract change.
+
+### 41. Ticket list queries can't be run without the caller's visibility
+
+**The danger.** Moving filters to composed Specifications is the most dangerous change of the week, because it fails silently. Suppose a Specification filters by status but forgets `created_by_id`. Then a USER's `?status=OPEN` returns everyone's open tickets, and the response looks perfectly normal.
+
+**The decision: make the unsafe version impossible to write, not merely avoided.**
+- **Nothing outside one class can run a ticket Specification.** `TicketRepository` extends the bare `Repository`, not `JpaRepository` or `JpaSpecificationExecutor`. It declares only single-row reads and writes (`findById`, `save`, `saveAll`, `delete`, `deleteById`, `count`), so `findAll()` and `findAll(spec)` don't exist. The unused `findByStatus` is gone too: it listed tickets with no caller.
+- **The only multi-ticket queries take the caller.** These are `findVisible(actor, filters, order[, pageable])` and `countVisible(actor, filters)`, on a Spring Data fragment. Its implementation, `TicketQueriesImpl`, holds the only Specification executor for tickets, in a private field.
+- **Visibility always comes first.** The one private method that builds the WHERE clause starts from `visibleTo(actor)` and ANDs the filters onto it. A new filter can only narrow what the caller sees.
+- **Nothing outside that class can even build a ticket Specification.** The factories are private there. Filters arrive as plain data (`TicketFilters`), and the order as a closed enum (`TicketOrder`).
+- **A test keeps it that way.** `TicketRepositoryShapeTest` fails if `TicketRepository` gains a method that returns many tickets without taking the caller, or that takes a `Specification` or a `Sort`. I proved it can fail: putting `JpaRepository` and `JpaSpecificationExecutor` back produced 17 named violations, including `findOne(Specification)` and the query-by-`Example` methods.
+
+**What it can't stop:** hand-written JPQL against the `EntityManager`. That's a deliberate act that shows in review, not a forgotten `.and()`.
+
+**Measured.** As Fatima, `?status=OPEN&size=1` gives `totalItems: 1`, and both queries carry her visibility condition first:
+- `select … from ticket t1_0 where t1_0.created_by_id=? and t1_0.status=? order by …`
+- `select count(t1_0.id) from ticket t1_0 where t1_0.created_by_id=? and t1_0.status=?`
+
+Her `?team=Operations` returns 0, though three Operations tickets exist. The permission walk passed 55 of 55 and 20 of 20 on a fresh database after the change.
+
+**What the walk doesn't cover.** It calls only plain `GET /tickets`, so it proves the visibility path for every role but not the filters or the sort. Those were proved by hand. Friday's tests should cover them, as a USER especially.
+
+(Spring Data skips the COUNT when a first page comes back less than full, because it already knows the total. A test that wants to see the count query has to fill the first page, for example with `size=1`.)
+
+### 42. Filters: status, priority and team, and the four edge cases
+
+`GET /tickets` takes `status`, `priority` and `team`, alongside `page`, `size`, `search` and `sort`. Any one of them switches the response to the envelope, as the four original parameters do.
+
+| Case | Answer | Why |
+| --- | --- | --- |
+| Unknown value: `status=BANANA`, `team=Marketing`, `status=open` | 400 `VALIDATION_ERROR` on the parameter, with the same message and exact spelling as the field in a body. `team` takes its label (`Operations`). | A dropped bad value would quietly become "no filter" and return more than asked. One vocabulary for bodies and filters means clients never translate. |
+| Sent twice: `status=OPEN&status=CLOSED` | 400: "Status can only be sent once." | Spring joins repeated values with commas. `search=printer&search=laptop` silently searched for `printer,laptop`: a 200 with the wrong answer. First or last would be arbitrary, and OR would be a feature the contract doesn't have. Refusing keeps OR addable. |
+| Empty: `status=`, `priority=`, `team=`, `page=`, `size=`, `sort=` | 400 | `""` isn't an allowed value. Treating it as "not sent" would give everything to a client that blanked it by mistake. |
+| Empty `search=` | Every visible ticket, as the envelope | Every text contains `""`. This is the contract's own definition, not a special case. |
+| Unknown parameter | 400, see decision 44 | |
+
+A repeated parameter's message wins over its other messages: the check is put first among the binder's validators. Every failing parameter is listed, in field order.
+
+### 43. Search covers title and description: a closed list, and wildcards are literal
+
+**The closed list.** `search` matches `title` or `description`, ignoring case, and nothing else. Both appear in every response the caller gets for those tickets, and search only runs inside her visible rows.
+
+The reason it's closed is the same as the sort whitelist. A search over a field the caller can't read is an **oracle**: the row count reveals whether a value exists without the value ever appearing in a response. Any field added later must already be in the response for the same tickets.
+
+**Wildcards are literal.** `%`, `_` and the escape character `\` are escaped, and the query uses `like ? escape '\'`. Measured as Priya:
+- `?search=%` returned 0 rows before any ticket contained a `%`.
+- With a ticket titled `Apply the 15% discount to plan_b (C:\billing)`, `%`, `15%`, `n_b`, `\` and `C:\b` each find only that ticket.
+- `nxb` and `C:b` find nothing, so `_` is not "any one character" and `\` is not skipped.
+
+### 44. Unknown query parameters are refused where an endpoint takes parameters. Unknown body fields stay ignored
+
+**The general rule.** An endpoint that accepts query parameters rejects unknown ones with a 400 `VALIDATION_ERROR`, keyed by the unknown name: `"There is no query parameter called \"stauts\"."`. An endpoint that accepts none ignores everything.
+
+Today only `GET /tickets` takes parameters, so the behaviour is the same as "only `GET /tickets`". The general form means no amendment when `GET /users` gains a filter.
+
+**Why split it from the body rule.** The two cases differ in severity:
+- **An ignored body field is a write that silently didn't happen.** The client can detect that by reading the resource back.
+- **An ignored query parameter is a read that silently returned a superset.** `?stauts=OPEN` returned every visible ticket, which looks exactly like a correct answer. No client can detect it.
+- **On an endpoint with no parameters,** an unknown one can't change the answer, so there's nothing to misread. Rejecting it there would cost compatibility for nothing.
+
+**What it breaks.** Anything that appends a cache-busting or tracking parameter (`?_=1712345`, `utm_*`) to `GET /tickets` now gets a 400. Nothing does today: neither the frontend, which calls `/tickets` bare, nor the walk script. A client that needs cache-busting should use `Cache-Control`. A reserved prefix can be let through later; relaxing a 400 breaks nobody.
+
+**Rejected:**
+- **Keep ignoring everywhere** (the contract until now). The superset is undetectable.
+- **Reject unknown fields everywhere, bodies included.** That turns a detectable, low-severity case into a contract break for writes, in the same change. It remains open for the contract rewrite (decision 40).
+
+**Goes in the contract.** It replaces "Any other query parameter is ignored" in `GET /tickets`.
+
+### 45. Sorting: a closed list of five fields, never a property path
+
+**The parameter.** `sort=<field>` or `sort=<field>,asc|desc`, where the field is one of `id`, `title`, `status`, `priority` or `team`. Anything else is a 400 `VALIDATION_ERROR`: "Sort must be id, title, status, priority or team, optionally followed by ,asc or ,desc."
+
+**Why a whitelist, and why it's structural.** Spring Data's `Sort` takes a property path and follows associations, so `sort=createdBy.passwordHash` would either error or order rows by a value the caller can't read. That second case is an oracle: the order of the rows leaks the hidden value one comparison at a time.
+- **The client's text never reaches the query.** It's matched against fifteen exact spellings and becomes a `TicketOrder.Field` enum, which `TicketQueriesImpl` maps to a fixed expression.
+- **No ticket query takes a Spring `Sort`.** `TicketQueries` has no such parameter, any `Sort` inside a page request is dropped, and the shape test forbids one.
+
+**Why reject rather than ignore.** An ignored sort answers in an order the client didn't ask for. Any order looks plausible, so a client paging "by priority" would never notice it isn't.
+
+**The decisions:**
+- **Default:** `id` ascending, the contract's existing order, so existing clients see no change.
+- **One field only.** `id` ascending is always appended as the tiebreaker, so equal keys come back in the same order and page boundaries are stable (decision 7). A second `sort` is a 400 under "sent once". Multi-field sorting is a feature nobody needs yet, and refusing keeps it addable.
+- **Direction:** exactly `asc` or `desc`. `DESC`, `up`, a trailing comma and a third part are all 400s.
+- **Meaningful orders, not stored text:**
+  - `priority` sorts by rank (LOW < MEDIUM < HIGH < URGENT).
+  - `status` sorts by workflow order (OPEN < IN_PROGRESS < RESOLVED < CLOSED). Both are CASE expressions. Alphabetical would give HIGH, LOW, MEDIUM, URGENT and put CLOSED first: wrong, while looking plausible.
+  - `title` sorts by `lower(title)`.
+  - `team` sorts by its stored name, which is in the same order as its labels.
+
+Measured against the seed data: every order matches, and `status=OPEN&sort=priority,desc&size=2&page=2` returns `[2, 4]` of 4. The COUNT behind a page carries no ORDER BY.
+
+### 46. Sorting by expressions uses no index. Accepted at this data size
+
+**The problem.** Three of the five sortable fields sort by expressions: `lower(title)`, and the two CASEs for `status` and `priority`. A plain btree index on the column can't serve an ORDER BY on an expression, so PostgreSQL sorts those rows itself.
+
+**What gets sorted is every matching row, not the page.** To return page 3 by priority, the database ranks all the rows that pass the WHERE clause, then skips and takes. With a LIMIT it uses a top-N heapsort, so the cost grows with the size of the filtered set, not with the page size. At this size (12 rows, and for an internal desk plausibly thousands), that's an in-memory sort of well under a millisecond.
+
+**The decision: accept the in-memory sort, and add no indexes for it.**
+
+**Rejected:**
+- **Expression indexes,** for example `create index on ticket ((lower(title)))` and the same two CASEs. They only work if the index expression matches the query's *exactly*.
+  - For the CASEs that can't happen as the code stands. Hibernate sends them with bound parameters (`case when t1_0.priority=? then ? …`, as logged), and an index expression is written with literals. The query would have to be changed to inline them first.
+  - Even then, the CASE in `TicketQueriesImpl` and the one in a migration would have to stay in step by hand. A new priority added to one but not the other silently stops the index being used.
+  - They also cost a write on every insert and update, for a sort nobody has measured as slow. `lower(title)` alone would work, but on its own it isn't worth an index either.
+- **Persisted rank columns** (`priority_rank`, `status_rank`, kept in sync with the enum). That means a schema change, denormalised data that must be updated on every write, and a migration for every existing row. It's the right shape for a big table, and the wrong one for twelve rows.
+
+**Revisit when** `EXPLAIN ANALYZE` on a real list query shows a sort over many thousands of rows on a hot path, or when the index work starts. Then pick between the two above with numbers. `id` and `team` already sort by plain columns, so they can use ordinary btree indexes whenever those exist.
+
+### 47. Offset pagination is a snapshot per request, not a cursor
+
+**The behaviour.** Each page is its own query: page 2 is "skip `size` rows, take `size`" *at the moment page 2 is asked for*. If the set or the order changes between a client's page 1 and page 2 requests, rows shift across the boundary. For example, a ticket is created, deleted, or moves to another status. Then a row can appear on both pages, or on neither.
+
+**Making `status` sortable makes this likelier.** Under `sort=status`, a status change doesn't just add or remove a row, it *moves* it within the order. A ticket moving from OPEN to IN_PROGRESS while someone pages through `?sort=status` can jump from page 2 to page 1 between their two requests, and they never see it. The same happens with `priority`, and with filters on either.
+
+**The decision.** Accept it, and say it in the contract. It's how offset pagination works everywhere, the frontend still pages a dozen tickets in the browser rather than through the API, and the `id` tiebreaker already rules out the *other* failure: rows trading places between two identical requests. The fix, if it's ever needed, is keyset pagination: "after this `(sort key, id)`" instead of "skip N". That's a contract change of its own, with a cursor in the envelope.
+
+**Goes in the contract.** The pagination section says pages are computed per request, and that changes between requests can make a ticket appear twice or not at all.
+
+### 48. No single casing rule for fixed values. The contract shows an example of each
+
+**The situation.**
+- Enumerated values on the wire are `OPEN`, `IN_PROGRESS`, `LOW`, `URGENT`: uppercase.
+- Team labels are `Engineering`, `HR`: as written.
+- The sort field and direction are `priority,desc`: lowercase.
+
+All are matched exactly, so `status=open` and `sort=priority,DESC` are both 400s. There is no one rule like "values are uppercase" or "matching ignores case" that describes all three. Stating one would be wrong for at least one of them.
+
+**The decision.** The contract states no casing rule. It shows a correct example of each kind next to its parameter, for example `?status=IN_PROGRESS`, `?team=Operations` and `?sort=priority,desc`, and says the values are matched exactly.
+
+**`DESC` will be the first thing someone tries.** Spring Data's own `Sort` parameter accepts `DESC` and `desc` alike, and so do most APIs built on it. Someone used to that will send `sort=priority,DESC` and get a 400. The example has to show the lowercase form, and the 400's message already does. Accepting both was considered and left out for consistency with every other fixed value here, which is exact. Relaxing it later would break nobody.
+
+### 49. The ticket shape gains the people on it and its version, as flat, output-only fields
+
+**Why a name has to be in the shape.** Exposing `assigneeId` alone would cost nothing: a lazy proxy already holds its id. But it would be useless to most callers. `GET /users` is ADMIN and MANAGER only, so an AGENT, who sees every ticket, couldn't turn an assignee id into a person. So the shape carries a name.
+
+**The fields.** Every ticket response gains:
+- `assigneeId`, `assigneeName`: both null when the ticket is unassigned
+- `createdById`, `createdByName`: always set
+- `version`
+
+**The decisions:**
+- **Flat, not nested** (`{"assignee": {"id": 4, "name": "Liam"}}`).
+  - The assign endpoint already takes `{"assigneeId": n}`, so the same name means the same thing in and out.
+  - The rest of the ticket shape is flat, and so is the frontend's `Ticket` type.
+  - Nested would buy one `null` for "unassigned" instead of two. That's small, because "both null or both set" is one sentence. A nested object, with an `id` inside, is also exactly what a full-form client would echo back as an assign that looks legitimate (decision 40).
+- **Name only, no email.** An email would tell apart two people with the same name, and give a way to contact them. The id already disambiguates for software, and contact isn't this endpoint's job. And email is the **login identifier**: putting it on every ticket would give every AGENT and USER half a credential for everyone on the tickets they can see.
+- **`createdBy` gets the same treatment.** The ownership rules hinge on the creator, and the UI needs "raised by". For a USER it's always herself, since she only sees her own tickets. That's redundant but harmless, and one shape for every role means no role-dependent fields.
+- **`version` in the body, not an ETag.** An ETag is one header per response, so a list of 20 tickets can't carry 20. The field has to be in the body regardless, and Friday's tests read it there. An ETag on `GET /tickets/{id}` can be added alongside it if `If-Match` ever arrives (decision 40).
+
+**All five are refused on input,** on `POST /tickets` and `PATCH /tickets/{id}`, with a 400 `VALIDATION_ERROR` on the field. That's decision 40's one rule, using the shape's real names. Decision 40 wrote `createdBy` before the shape existed; the fields are `createdById` and `createdByName`. `id` stays ignored, as the contract says. That's the one exception left for the contract rewrite to settle.
+- **Each field is a `JsonNode` with `@Refused`, not an `Object`.** Jackson gives an explicit `"assigneeId": null` a `NullNode`, but gives an `Object` field plain `null`, the same as "not sent". `{"assigneeId": null}` is how a client would try to unassign, and it must be refused, not answered with a 200 that did nothing.
+- **Tested** (`TicketOutputOnlyFieldsTest`, through real HTTP with a real login token):
+  - Daniel (AGENT) sending `{"assigneeId": <Liam>}` on his own ticket gets **400**, and the row's assignee is unchanged.
+  - `{"assigneeId": null}` gets **400**, and the row is unchanged.
+  - `{"title": …, "version": 0}` gets **400**, and neither the title nor the version moves.
+  - Claiming an unassigned ticket gets **403**, from the interceptor, before the body (decision 22). The row is still unassigned.
+- **Against the previous request record,** where the fields weren't declared, the first three failed with `expected:<400> but was:<200>`: silently ignored. The 403 case passed both times, because that rule already existed.
+
+### 50. What the shape exposes, and why it's narrower than the user list
+
+**What's new.** An AGENT and a USER now learn the **id and name** of every person who created, or is assigned, a ticket they can see. Before, only ADMIN and MANAGER could see any other user, through `GET /users`.
+
+**Why that's acceptable:**
+- **`GET /users` gives everyone, with email, username, role and contact details.** This gives names only, and only of people connected to tickets the caller can already see.
+- **A USER sees only her own tickets,** so she learns her own name and the names of the people working them. Being told who is handling your ticket is part of a helpdesk.
+- **An AGENT sees every ticket,** so in practice he learns the names of everyone active on them. That's names only, of colleagues he already works alongside.
+
+**One inference to note.** Anyone who appears as an *assignee* is not a USER, because USERs can't be assigned (decision 37). That's a small role leak. It's accepted: the people who can assign already learn roles from the assign endpoint's messages, and "this person works tickets" is visible from the work itself.
+
+**It stays acceptable while** the shape carries names and ids only. Adding email, role or contact details to it would need this argument made again.
+
+### 51. The N+1: a broken feature, not a slow one. `open-in-view` stays off, and the fix is fetch joins
+
+**Measured** for `GET /tickets?size=20` as Priya (12 tickets):
+
+| State | Result |
+| --- | --- |
+| Names exposed, no fetch, `open-in-view` off (the real configuration) | **500**: `LazyInitializationException: Could not initialize proxy [com.opsdesk.backend.user.AppUser#2] - no session` |
+| The same, measured with `open-in-view` on | **8 SELECTs**: the caller, the page, then 6 for users, one per distinct person |
+| After the fix | **2 SELECTs**: the caller (the token filter), then the page, with the assignee and creator joined |
+| After the fix, `?size=5` (a full first page, so the COUNT runs) | **3 SELECTs** |
+
+The single-ticket endpoints kept their counts from decision 38 (GET 2, PATCH 3, assign 4, unassign 3), with the users now joined into the ticket's query. The permission walk passed 55 of 55 and 20 of 20.
+
+**Why 6, not 12 or 24.** The persistence context loads each person **once per request**, however many tickets point to them. The page's 12 tickets have 6 distinct creators, and the 4 assignees are all among them. So the "N" is **distinct people on the page**, at most 2 per ticket. The worst case is 1 + 1 + 2N: 42 SELECTs for a full page of 20 if every creator and assignee were different. The seed data makes it look smaller than it is.
+
+**With `open-in-view` off, this was broken, not slow.** Every endpoint that maps a ticket returned a 500: the list, `GET /tickets/{id}`, `PATCH`, and both assignee endpoints. Create was the exception, because its creator is the caller's real object, not a proxy.
+
+**`open-in-view` stays off. It is not the fix.** Turning it on makes the 500 go away by running the missing queries quietly during the response. A missing fetch stops being a deterministic failure and becomes a hidden query: the same 8 SELECTs, invisible until someone counts them.
+
+**The fix:**
+- **The list:** a Specification in `TicketQueriesImpl` (`withPeople`) that left-joins the assignee and creator, guarded for the COUNT (decision 52). Both are to-one, so the joins add columns, never rows. Paging stays in SQL, and Hibernate logged no "applying in memory" warning.
+- **The `findById` paths:** `@EntityGraph(attributePaths = {"assignee", "createdBy"})` on the `findById` *declared* on the bare `Repository`. Spring Data reads annotations on declared CRUD methods, so this needs no `JpaRepository`. Every single-ticket path goes through it: GET, PATCH, assign, unassign and the interceptor.
+
+### 52. The COUNT-query trap: a fetch in a Specification breaks the count, and hid at `?size=20`
+
+**What happened.** The first version of `withPeople` fetched without a guard. `SimpleJpaRepository` runs the same Specification for the COUNT behind a page's totals. The count selects `count(t)`, not the ticket, so the fetched assignee has no owner to attach to, and Hibernate 7 rejects the whole query:
+```
+org.springframework.dao.InvalidDataAccessApiUsageException: org.hibernate.query.SemanticException:
+Query specified join fetching, but the owner of the fetched association was not present in the select list
+[SqmSingularJoin(com.opsdesk.backend.ticket.Ticket(var_1).assignee(var_1_1) : assignee)]
+```
+It's invalid, not silently wrong, and the client got a 500.
+
+**It hid completely at `?size=20`.** Spring Data skips the COUNT when a first page comes back less than full, because it already knows the total. Priya's 12 tickets on a page of 20 never ran it, so that request answered 200. Only `?size=5`, a full first page, exposed it.
+
+**The guard.** Skip the fetch when `query.getResultType()` is `Long`, which means it's the count. The count needs no users. It still carries the visibility condition from `where()`, as measured: `select count(t1_0.id) from ticket t1_0 where t1_0.created_by_id=?`, with no join.
+
+**A requirement for Friday's tests.** At least one list test must use a page size **smaller than the seeded data**, so the first page is full and the COUNT runs. Otherwise the count query is never exercised, and this whole class of bug passes every test. Better still, test a second page as well, which always runs the count.
+
+### 53. Mapping stays in the controller, outside the transaction
+
+**The decision.** `TicketResponse.from` runs in the controller, after the service's transaction has ended, with `open-in-view` off. The response reads the assignee's and creator's names, so the query that loaded the ticket must have fetched them. If one ever doesn't, the mapping throws `LazyInitializationException`: a 500 on that endpoint, every time.
+
+**The rejected alternative: mapping inside the transaction** (in the service, or with `open-in-view` on). It never crashes. That's the problem: a missing fetch quietly becomes one extra query per person, and the N+1 creeps back where nobody sees it. A deterministic 500 is a better signal than a slow page.
+
+**The condition that makes this safe.** The crash only reaches production on an endpoint that no test calls. So **every endpoint that returns a ticket needs a test that calls it**: list, single, create, edit, assign and unassign. That makes full endpoint coverage in Friday's tests a requirement, not a nicety.
+
+### 54. The caller's row is read twice per request: accepted
+
+**What happens.** The token filter loads the caller by email (decision 28 is why it reads the database at all: the stored role, not the token's). When a ticket she created is then loaded, her row comes back again: today as joined columns in the ticket query. Before the fetch joins, it was a SELECT by id of its own.
+
+**Why.** The filter's lookup runs in its own persistence context, which has ended before the request's own one starts, so Hibernate can't reuse the object.
+
+**Why it's accepted.** It's one constant query per request, not one per row. After the fix, the only cost is the filter's own query. It's noted here and in `JwtAuthFilter`, so nobody rediscovers it as a bug.
+
+### 55. The creator's inner join in `findById`, and how a missing creator would fail
+
+**What Hibernate does.** For the `findById` entity graph, Hibernate joins the creator with an **inner** join, because `createdBy` is `optional = false`. The assignee gets a left join. The list's `withPeople` asks for LEFT on both explicitly.
+
+**What would happen if a creator row went missing:**
+- **`GET /tickets/{id}`** would find no row and answer **404**, as if the ticket didn't exist. That's a quiet failure, and it runs against the loud-failure principle the rest of this design follows.
+- **The list** would return the row with a null creator, and `TicketResponse.from` would throw: a 500, the loud one.
+
+**Why it's left as it is.** It can't happen. `created_by_id` is NOT NULL with a foreign key to `app_user`, so the database refuses to delete a user who created tickets, and refuses a ticket without a creator. It's recorded because it's the one place where a broken invariant would hide instead of crash. If the foreign key is ever relaxed (for example, to let users be deleted), revisit it: make the join LEFT, so the missing creator fails loudly in the mapping instead.
+
+### 56. One index: `(created_by_id, id)`. How it was measured, and what it changed
+
+**PostgreSQL does not index foreign key columns.** It indexes primary keys and unique constraints by itself, nothing else. So `ticket` had only `ticket_pkey`. `created_by_id` was unindexed, although it's in the visibility condition of every list query a USER makes; so were `assignee_id` and `project_id`.
+
+**The experiment.** It ran in a throwaway `index_lab` schema in the dev PostgreSQL, never in `public`, whose exact decision 27 matrix the walk depends on.
+- **The tables** were the app's own, copied with `CREATE TABLE … (LIKE public.… INCLUDING ALL)`, plus the two foreign keys, which `LIKE` doesn't copy. They had the same columns, checks, primary key and unique constraints, and the same missing foreign-key indexes.
+- **It ran on PostgreSQL 16.15 with the default 128 MB `shared_buffers`,** so the whole data set was in cache once warm.
+- **`VACUUM ANALYZE` ran before every measurement.** `ANALYZE` gives the planner real statistics. `VACUUM` sets the visibility map, without which an "index-only" scan still reads the heap.
+- **Each query** was run 7 times through `EXPLAIN (ANALYZE, BUFFERS)`, and the median is reported; the first, cold run excluded.
+- **The queries** were the app's real SQL: both left joins, `offset 0 rows fetch first 10 rows only`, literal values.
+
+**The data.** 5,000 tickets (200 heap pages, 1.6 MB) and 200 users, from a fixed seed. The distribution decides which indexes help, so here it is:
+- **Users:** 1 ADMIN, 5 MANAGER, 40 AGENT, 154 USER.
+- **Creators:** USERs raised 79%, deliberately skewed (`random()²`): per USER the minimum is 7, the median 19, the maximum 335. AGENTs raised 19% and MANAGERs 2%, uniformly.
+- **Status:** OPEN 14.7%, IN_PROGRESS 15.0%, RESOLVED 25.4%, CLOSED 44.9%. That's four values.
+- **Assignees:** OPEN tickets 59% unassigned, others about 5%, spread over 40 agents.
+- **Priority:** 29 / 40 / 23 / 8 %. **Team:** uniform.
+- **Search:** 156 tickets mention "printer".
+
+Queries 1 and 2 were measured for three USERs: sparse (user 142, 7 tickets), median (93, 19) and heavy (47, 335). The best plan depends on how many tickets the user has.
+
+**Before and after, with only `(created_by_id, id)` added** (post-vacuum baseline):
+
+| Query | Before | After | Plan, before → after |
+| --- | --- | --- | --- |
+| USER list, sparse (7) | 1.192 ms | 0.128 ms | walks all of `ticket_pkey`, Filter removes 4,993 → `Index Scan … Index Cond: (created_by_id = ?)`: **no Sort, no Filter**, reads 7 entries |
+| USER list, median (19) | 0.640 ms | 0.147 ms | walks `ticket_pkey`, Filter removes 2,522 → the same Index Scan, reads 10 |
+| USER list, heavy (335) | 0.167 ms | 0.143 ms | walks `ticket_pkey`, Filter removes 194, **unchanged**: at 6.7% of the table, id order fills 10 just as fast |
+| USER list + status, median | 1.089 ms | 0.163 ms | seq scan, Filter removes 4,998, Sort → bitmap on her 19 rows, status Filter, Sort of 2 |
+| COUNT for a USER, median / heavy | 0.98 / 1.00 ms | 0.061 / 0.100 ms | seq scan → **Index Only Scan, `Heap Fetches: 0`** |
+| COUNT for USER + status, median | 1.03 ms | 0.109 ms | seq scan → bitmap on her rows plus a status Filter |
+| ADMIN list, `status=OPEN` / `CLOSED` | 0.120 / 0.109 ms | 0.115 / 0.107 ms | walks `ticket_pkey`, unchanged |
+| ADMIN COUNT, unfiltered | 0.588 ms | 0.584 ms | Index Only Scan of `ticket_pkey`, all 5,000 entries, unchanged (decision 58) |
+| ADMIN search "printer" | 8.894 ms | 7.771 ms | seq scan, unchanged (decision 58) |
+
+**Read it as growth, not milliseconds.** At 5,000 rows everything is under 10 ms, so a verdict in milliseconds invites "no index is needed".
+- **A USER's page without the index grows with the table.** The primary-key walk reads about N × 10 / k rows before it fills a page, where k is her ticket count. For a USER with fewer than 10 tickets it reads **all N**, in random heap order, on every request. That's half a million rows at 500,000 tickets, and the users with the *fewest* tickets pay the most. **With the index it stays roughly constant:** one descent, then 10 entries.
+- **A USER's COUNT without the index is a full seq scan,** so it's linear in the table, and it runs on every full first page and every later page. With the index it's an index-only scan of her own entries: about k, which grows with her activity, not with the table. Because the COUNT had no fast path at all, this is the bigger of the two wins.
+- **It also serves the foreign-key check** on `created_by_id` when a user row is deleted, because `created_by_id` is the leading column.
+
+**What it costs:** 176 kB at 5,000 rows, about 3.5 times the 56 kB single-column index, because it carries `id`. Plus one extra index write on every insert, and on any update that changes `created_by_id` (none do).
+
+**Declared on the entity, not in SQL:** `@Table(indexes = @Index(name = "ix_ticket_created_by_id_id", columnList = "created_by_id, id"))` on `Ticket`. The schema is built from the entities, so a hand-made index would vanish on the next recreate, and a production schema would never have it. Verified: the recreated dev schema has it.
+
+### 57. The indexes measured and rejected
+
+Every index costs space and a write on every insert and update. One that no plan uses is worse than none, because it looks like it's doing something. Each was measured on its own against the same baseline.
+
+- **`created_by_id` alone** (56 kB). It does help: the sparse USER's list drops to 0.21 ms, and the Filter is gone. But the **Sort stays**, because rows come back in creator order and the page wants id order. And its COUNT is a bitmap **heap** scan, because Hibernate counts `count(t.id)` and `id` isn't in this index. `(created_by_id, id)` does everything this does and more. **Rejected: dominated.**
+- **`(created_by_id, status)`** (80 kB). Q2's two conditions both become an `Index Cond`, so the Filter is gone, but the **Sort stays**. And a USER's plain list and its COUNT fall back to a bitmap heap scan plus a Sort. **Rejected:** worse for the common case to help a rarer one.
+- **`(created_by_id, status, id)`** (232 kB). The only shape that fully serves "my tickets with this status": Index Scan with no Sort, and its COUNT index-only. But it doesn't serve the plain list, so it would be a *second* index next to the kept one. **Rejected on growth:** with the kept index, a USER's status filter costs about her own ticket count, not the table's. At 500,000 tickets a median USER still filters about 19 rows. Revisit if one user with thousands of tickets filters by status often.
+- **`status`** (56 kB). **A real but modest win, rejected on cost, not because the win is imaginary.**
+  - The ADMIN lists didn't change at all: the planner kept walking the primary key, because a common status fills a page almost at once.
+  - `count … status=OPEN` (15%) improved by **30%** (0.96 → 0.67 ms), as a bitmap heap scan. Those 735 rows are spread across almost every heap page, so it still reads nearly the whole table.
+  - `count … status=CLOSED` (45%) kept its **seq scan**: the planner's own verdict that, for a value matching nearly half the table, reading the table straight through beats jumping between index and heap.
+  - That's a constant-factor improvement on one COUNT, and the count stays **linear** either way. 15% of 500,000 is 75,000 rows to count, whatever is indexed. It's paid for with a write on every insert and every status change, which is the most common update a ticket gets.
+- **`assignee_id`.** **Rejected today, and recorded as a prediction.**
+  - **No plan uses it.** The joins probe `app_user.id`, which is already the primary key. Nothing looks tickets up *by* assignee.
+  - **Its one use** is the foreign-key check when a user row is deleted (0.47 → 0.18 ms). There's no delete-user endpoint.
+  - **The prediction:** the first time an AGENT can ask for "my assigned tickets", which is `where assignee_id = ? order by id`, **`(assignee_id, id)` is the exact analogue of the kept index**, for the same reason: it serves the condition and the ORDER BY, so there's no Sort, no Filter, and an index-only COUNT. Add it with that filter, not before.
+
+### 58. What stays linear whatever is indexed: search and the unfiltered total. Both are contract decisions
+
+**The conclusion of the index work.** Two queries stay linear in the table, whatever is indexed. Both are linear because of a **promise in the contract**, not a missing index. So the next real performance decisions are contract decisions, not schema ones.
+
+**1. Search: a seq scan, because the contract says "contains".**
+- **Measured** at 7.4 to 8.9 ms on 5,000 tickets: a seq scan applying `lower()` and `LIKE` to every title and every ~200-character description. That's about 1.6 µs a row.
+- **Why no index helps:** the contract defines search as **substring** ("contains this text"), and that's where the leading `%` comes from. A btree can only serve a known prefix.
+- **If search meant prefix,** a btree on `lower(title)` with `text_pattern_ops` (or a C collation) would serve `LIKE 'abc%'`.
+- **For substring,** the only index is a trigram GIN index (`pg_trgm`), with its own costs: a larger index, slower writes on every title and description change, and an extension to install.
+- **Decision deferred, not built.** It becomes urgent at about **25,000 tickets**, where one search reaches about 40 ms. At 500,000 it would be about 800 ms a request. The choice then is prefix search (a contract change) or a trigram index (a schema change with a write cost). It should be made deliberately, before that size.
+
+**2. An ADMIN's unfiltered `totalItems`: it counts every row, because the answer depends on every row.**
+- **Measured** at 0.59 ms on 5,000 tickets. That's already the best plan a count can have: an Index Only Scan of the primary key, `Heap Fetches: 0`, all 5,000 entries. No index makes it cheaper, because the number it returns *is* the size of the table.
+- **It runs** on every ADMIN or MANAGER list request whose first page is full, which is any real table, and on every later page.
+- **How it scales** (about 0.12 µs an entry): about 60 ms at 500,000 tickets, and about 600 ms at 5 million. It reaches the 40 ms mark at about **350,000 tickets**.
+- **The contract decision:** must `totalItems` (and `totalPages`) be **exact**? The alternatives are:
+  - an **estimate** above some size, from PostgreSQL's statistics (`pg_class.reltuples`): free, but approximate and only as fresh as the last ANALYZE
+  - a **cap**, for example "more than 10,000"
+  - **omitting** the total, and returning only whether a next page exists, which needs one extra row and no count at all
+
+  Each changes what the frontend can show: "page 3 of 412", or "page 3 of many". Today exact is right, at any size this project will see soon.
+
+**Filtered COUNTs are different.** A USER's count is served by the kept index and costs about her own ticket count. An ADMIN's count by status is linear by nature (decision 57), and the same contract question applies to it.
+
+### 59. `role` is on every User response
+
+**The problem, found while rewriting the contract.** No response carried the caller's role. `UserResponse` had no `role` field, and `GET /auth/me` returns a `UserResponse`. Two clients need it:
+- **A client deciding which buttons to show** the signed-in user. The contract's permission table is useless if the client can't tell which row it's in.
+- **A MANAGER's assign dropdown.** The assign endpoint refuses a USER with a 400 (decision 37), and without `role` the dropdown can't leave USERs out. It would offer people whom the endpoint then refuses.
+
+**The decision.** `role` goes on `UserResponse` itself, so it reaches both `GET /auth/me` and `GET /users`, and not as a field only on `/auth/me`.
+
+**Rejected: reading the token's `role` claim.**
+- **The claim isn't authoritative.** The server never trusts it: the role used is the one read from the database on every request (decision 28). A client reading the claim would show the role the user had at login, for up to 60 minutes after an administrator changed it.
+- **It would make every client decode a JWT just to render a button,** and turn the token's contents into part of the contract. The contract says they aren't.
+
+**What it reveals.** `GET /users` is ADMIN and MANAGER only, and they could already learn every user's role from the assign endpoint's messages (decision 37). `/auth/me` gives a user only her own role.
+
+**The dropdown's filter is a copy of a server rule.** The contract tells a client to keep users whose `role` isn't `USER`, which duplicates the assign endpoint's own check. The better shape would be a server-side filter, for example `GET /users?assignable=true`, so the rule lives in one place. It's not built: one client, one rule, and the endpoint still refuses a USER whatever the client offers.
+
+### 60. The contract was checked against the running app. Its captures should be pinned by tests
+
+**What was done.** The API contract was rewritten (opsdesk-frontend PR #51), and every example response in it was captured from this backend, running on a freshly seeded database. Each example sits under a hidden comment naming the exact request and caller, so it can be re-run. About 50 further claims were also checked against the running app: expired and malformed tokens, a role changed mid-session, the 72-byte password limit, ids with leading zeros, and the order of the checks. Two claims in the draft were wrong and were corrected there.
+
+**A requirement for Friday: pin the captures that matter with tests.** A capture records what was true on the day it was taken. If the backend later changes a message, a status or a field, the capture goes **stale silently**, and the contract goes on showing the old response with full confidence. A test **fails when the code drifts**.
+
+The contract's one hand-written example, the 409 for a stale write, is the model: `GlobalExceptionHandlerTest` asserts its status, code and message. Friday's tests should do the same for the responses a client depends on:
+- the 401 and 403 bodies
+- the identical 404 for a hidden and a missing ticket
+- the validation messages
+- the output-only refusals
+- the Ticket and User shapes, including `role`
+- the envelope
+
+**Login timing, measured while checking the contract.** POST /auth/login was timed for three cases, five requests each, median taken:
+
+| Case | Median |
+| --- | --- |
+| Unknown email | 89.3 ms |
+| Known email, wrong password | 89.1 ms |
+| Right password | 92.6 ms |
+
+The passwords are hashed with **BCrypt at cost factor 10** (`new BCryptPasswordEncoder()`, Spring Security's default; the stored hashes start `$2a$10$`), so each check is 2¹⁰ rounds. That's what dominates the time. The unknown-email case costs the same because `AuthService` checks the password against a dummy hash when there's no such user.
+
+**What the numbers show, and what they don't.** These three medians show **no gross timing difference** between an unknown email and a wrong password, so the response time doesn't obviously reveal which emails have accounts. They do **not** show that login is constant-time. That would take a distribution: many samples per case, under realistic load, and a statistical comparison. A difference smaller than the noise of five requests on a development machine would not show up here. The contract claims only that both cases "take about as long", which is what was measured.
+
+### 61. Single tickets get their own shape test: every service method that returns a ticket takes the caller
+
+**What was found in review.** `TicketService.getTicket(Long id)` was public, read a ticket with **no visibility check**, and had no caller outside `TicketServiceTest`. Nothing reached it from HTTP, but it was exactly the method a future endpoint could pick up by mistake, and leak a USER's view of someone else's ticket. `TicketRepositoryShapeTest` couldn't catch it: that test guards the repository's *list* queries, and this was a single-ticket method in the service.
+
+**Why single tickets need a guard one layer up.** The repository's `findById` takes no caller, on purpose: the visibility check for one ticket has to turn "not allowed" into the same 404 as "doesn't exist" (decision 23), which a query can't do. So that check lives in `TicketService.getVisibleTicket`. That made the rule for single tickets a convention: "always go through `getVisibleTicket`".
+
+**The decision:**
+- **`getTicket(Long)` is deleted,** along with the `TicketNotFoundException(Long)` constructor that only it used.
+- **`TicketServiceTest`** now tests `getVisibleTicket`, the lookup every endpoint uses. It's a Mockito unit test with no database, so there's no stored state to read through a repository. It covers a found ticket, a missing one, a hidden one (the same 404 message for the same id), and an id that isn't a number (a 404 with no query).
+- **`TicketServiceShapeTest`**, the twin of the repository test, fails if any public method declared on `TicketService` returns a `Ticket` or `TicketResponse` (or a `List`, `Page` or `Optional` of them) without taking an `AppUser`. With `getTicket(Long)` put back, it reported: `public com.opsdesk.backend.ticket.Ticket com.opsdesk.backend.ticket.TicketService.getTicket(java.lang.Long) returns a ticket without taking the caller, so it can't check visibility`.
+
+**What it doesn't prove.** It checks that a method *takes* the caller, not that it *uses* her for visibility. A method that accepts an `AppUser` and ignores it would pass. That's still a review question, made much narrower: today every such method goes through `getVisibleTicket` or `findVisible`.
 
 ### Comments in `AppUser` that this week makes wrong
 

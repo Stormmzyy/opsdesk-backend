@@ -6,10 +6,9 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Sort;
-import org.springframework.data.jpa.domain.Specification;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.opsdesk.backend.error.InvalidFieldException;
 import com.opsdesk.backend.user.AppUser;
@@ -51,28 +50,30 @@ public class TicketService {
     // returns rows in whatever order they sit on disk. (NOTES.md, decision 7.)
     //
     // Only the tickets this caller may see: every ticket for ADMIN, MANAGER
-    // and AGENT, only her own for a USER (TicketSpecifications.visibleTo).
+    // and AGENT, only her own for a USER. The repository applies that itself:
+    // findVisible is the only list query it has, and it takes the caller
+    // (TicketQueriesImpl).
     public List<Ticket> listTickets(AppUser actor) {
-        return ticketRepository.findAll(TicketSpecifications.visibleTo(actor), Sort.by("id"));
+        return ticketRepository.findVisible(actor, TicketFilters.NONE, TicketOrder.DEFAULT);
     }
 
-    // One page of tickets, optionally filtered by status and search text.
-    // page is 1-based, as the contract counts; status and search may be null.
+    // One page of tickets, filtered by any of status, priority, team and
+    // search text. page is 1-based, as the contract counts.
     //
-    // The visibility condition is part of the same Specification, so it's in
-    // the WHERE clause of both the page query and the count query: a USER's
-    // totalItems and totalPages count only her own tickets.
-    public Page<Ticket> findTickets(long page, int size, TicketStatus status, String search, AppUser actor) {
-        Specification<Ticket> filters = TicketSpecifications.matching(status, search)
-                .and(TicketSpecifications.visibleTo(actor));
-
+    // Visibility isn't added here, and can't be forgotten here: the service
+    // has no way to run a ticket query without passing the caller.
+    // TicketQueriesImpl starts every WHERE clause from her visibility, so it's
+    // in both the page query and the count query, and a USER's totalItems and
+    // totalPages count only her own tickets.
+    public Page<Ticket> findTickets(long page, int size, TicketFilters filters, TicketOrder order,
+                                    AppUser actor) {
         // A page so far out that its first row would be past row 2,147,483,647
         // can't be asked for: Hibernate's offset is an int, and the request
         // would crash with a 500. No table here is that big, so the page is
         // certainly past the last one. The contract says that's a 200 with no
         // items and the real totals, so answer exactly that with a count.
         if (page - 1 > Integer.MAX_VALUE / size) {
-            return new PageImpl<>(List.of(), Pageable.unpaged(), ticketRepository.count(filters));
+            return new PageImpl<>(List.of(), Pageable.unpaged(), ticketRepository.countVisible(actor, filters));
         }
 
         // The off-by-one: the contract's pages start at 1 ("page=1" is the
@@ -81,19 +82,13 @@ public class TicketService {
         // return the second page, and the first ten tickets could never be
         // fetched.
         //
-        // Sort.by("id") goes into the paged query itself (NOTES.md, decision
-        // 7). Without an ORDER BY, PostgreSQL may return rows in a different
-        // order for each query, so page 1 and page 2 could overlap or skip
-        // tickets, and an update could move a ticket from one page to another.
-        Pageable pageable = PageRequest.of((int) (page - 1), size, Sort.by("id"));
-        return ticketRepository.findAll(filters, pageable);
-    }
-
-    // orElseThrow turns "no such ticket" into an exception right here, so every
-    // method that needs an existing ticket gets the same 404 for free.
-    public Ticket getTicket(Long id) {
-        return ticketRepository.findById(id)
-                .orElseThrow(() -> new TicketNotFoundException(id));
+        // The order goes into the paged query itself, always ending with id
+        // as the tiebreaker (NOTES.md, decision 7). Without a total order,
+        // PostgreSQL may return rows in a different order for each query, so
+        // page 1 and page 2 could overlap or skip tickets. The page request
+        // carries no Sort: the order is the TicketOrder, and only that.
+        Pageable pageable = PageRequest.of((int) (page - 1), size);
+        return ticketRepository.findVisible(actor, filters, order, pageable);
     }
 
     // A ticket as one caller may see it, looked up by the id exactly as it
@@ -147,6 +142,21 @@ public class TicketService {
 
     // A null argument means "not sent, leave it alone". That's the difference
     // between PATCH (change some fields) and PUT (replace the whole ticket).
+    //
+    // @Transactional (NOTES.md, decision 38): the ticket is loaded, changed
+    // and flushed in ONE persistence context, so it stays managed from
+    // findById to commit. Without it, the repository's own transaction ended
+    // right after findById, the ticket came back detached, and save() had to
+    // merge it: re-read the row, copy every field from our copy onto it
+    // (including a status read before someone else changed it), then write
+    // them all. Managed, save() has nothing to merge, and at commit Hibernate
+    // compares the ticket with the snapshot it took on load, so
+    // @DynamicUpdate writes only the fields this request changed, and
+    // @Version refuses the write if the row moved on in between.
+    //
+    // The refusals below (404, 403) throw a RuntimeException, which rolls the
+    // transaction back; nothing was changed by then anyway.
+    @Transactional
     public Ticket updateTicket(String rawId, AppUser actor, String title, String description,
                                Priority priority, TicketStatus status, Team team) {
         // Looked up first, so a missing or hidden ticket is a 404 before
@@ -172,9 +182,10 @@ public class TicketService {
         if (team != null) {
             ticket.setTeam(team);
         }
-        // With today's List, the ticket was already changed in place, so this
-        // save does nothing new. With JPA tomorrow, save is what writes the
-        // change to the database, so it stays.
+        // The ticket is managed, so this save doesn't write anything itself:
+        // the UPDATE happens at commit, when the method returns. It stays so
+        // the method reads correctly, and still works if it's ever called
+        // without the transaction (it would merge, as before).
         return ticketRepository.save(ticket);
     }
 
@@ -192,6 +203,14 @@ public class TicketService {
     // Assigning to whoever already has it is not an error. The request asks
     // for an end state that already holds, so it answers 200 and, because
     // nothing changed, writes nothing.
+    //
+    // @Transactional for the same reason as updateTicket: the ticket stays
+    // managed, so save() doesn't re-read it to merge a detached copy. This is
+    // a tidy-up, not a correctness fix. Without it, the detached merge was
+    // already safe once Ticket had @Version: merge compares the copy's
+    // version with the row's and throws if the row moved on, so a stale
+    // assign failed instead of writing back an old status.
+    @Transactional
     public Ticket assignTicket(String rawId, AppUser actor, Long assigneeId) {
         Ticket ticket = getVisibleTicket(rawId, actor);
         canAssign(actor, ticket);
@@ -217,6 +236,7 @@ public class TicketService {
             }
         }
         ticket.setAssignee(assignee);
+        // Managed, so this writes nothing itself; the UPDATE runs at commit.
         return ticketRepository.save(ticket);
     }
 
@@ -252,7 +272,7 @@ public class TicketService {
 
     // View: ADMIN, MANAGER and AGENT see every ticket; a USER sees only the
     // tickets she created. The list applies the same rule as a query
-    // (TicketSpecifications.visibleTo); this is the single-ticket form.
+    // (TicketQueriesImpl.visibleTo); this is the single-ticket form.
     //
     // The one rule that answers instead of throwing. The other three throw
     // AccessDeniedException, which becomes a 403. A view refusal must not

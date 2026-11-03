@@ -1,7 +1,11 @@
 package com.opsdesk.backend.ticket;
 
 import com.opsdesk.backend.validation.OneOf;
+import com.opsdesk.backend.validation.Refused;
 import com.opsdesk.backend.validation.TextField;
+
+// Boot 3 used Jackson 2 (com.fasterxml.jackson.databind.JsonNode); Boot 4 uses Jackson 3.
+import tools.jackson.databind.JsonNode;
 
 // The body of POST /tickets. Every message below is copied exactly from the
 // contract's validation table.
@@ -11,10 +15,12 @@ import com.opsdesk.backend.validation.TextField;
 // matching field here and ignores it (Spring Boot turns off "fail on unknown
 // properties"), so the request is accepted, not rejected.
 //
-// No createdBy either, for the same reason and a stronger one: the creator
-// is always the signed-in user, taken from the token (TicketController). A
-// createdBy or createdById in the body is ignored, so nobody can create a
-// ticket in someone else's name.
+// The creator is always the signed-in user, taken from the token
+// (TicketController), so nobody can create a ticket in someone else's name.
+// The ticket shape's output-only fields (createdById, createdByName,
+// assigneeId, assigneeName, version) are declared below only to be refused:
+// sending one, even as null, is a 400 (NOTES.md, decisions 39 and 40). A new
+// ticket is assigned through PATCH /tickets/{id}/assignee, like any other.
 //
 // Every field is Object, not String or an enum, so Jackson accepts whatever
 // JSON type the client sent and validation can name the problem: a number for
@@ -39,7 +45,23 @@ public record CreateTicketRequest(
 
         @OneOf(required = true, values = {"Engineering", "Finance", "HR", "Operations", "Support"},
                 message = "Team must be one of Engineering, Finance, HR, Operations or Support.")
-        Object team) {
+        Object team,
+
+        // Output-only: refused, see the note above.
+        @Refused(message = "The assignee can't be set here. Use PATCH /tickets/{id}/assignee.")
+        JsonNode assigneeId,
+
+        @Refused(message = "The assignee can't be set here. Use PATCH /tickets/{id}/assignee.")
+        JsonNode assigneeName,
+
+        @Refused(message = "The creator is set by the server and can't be sent.")
+        JsonNode createdById,
+
+        @Refused(message = "The creator is set by the server and can't be sent.")
+        JsonNode createdByName,
+
+        @Refused(message = "The version is set by the server and can't be sent.")
+        JsonNode version) {
 
     // Trimming happens here, in the compact constructor, because the contract
     // says title and description are trimmed BEFORE they're validated:

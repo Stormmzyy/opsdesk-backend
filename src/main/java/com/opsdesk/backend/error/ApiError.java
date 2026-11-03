@@ -41,6 +41,14 @@ public record ApiError(String error, String message, Map<String, String> fields)
         return new ApiError("CONFLICT", message, null);
     }
 
+    // NOTES.md, decision 38. The same CONFLICT code as a taken email, but a
+    // fixed message, like forbidden(): it tells the client what to do
+    // (reload, look, try again) and nothing about versions, rows or which
+    // request won. GlobalExceptionHandler logs those.
+    public static ApiError concurrentChange() {
+        return new ApiError("CONFLICT", "Someone else changed this at the same time. Reload it and try again.", null);
+    }
+
     public static ApiError unauthorized(String message) {
         return new ApiError("UNAUTHORIZED", message, null);
     }

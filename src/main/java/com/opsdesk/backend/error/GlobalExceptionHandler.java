@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -102,6 +103,35 @@ public class GlobalExceptionHandler {
         log.warn("403 FORBIDDEN on {} {} for {}: {}", request.getMethod(), request.getRequestURI(),
                 describeCaller(), exception.getMessage());
         return respond(HttpStatus.FORBIDDEN, ApiError.forbidden());
+    }
+
+    // 409 CONFLICT: the optimistic lock refused a write (NOTES.md, decision
+    // 38). This request read the ticket, another request changed and
+    // committed it, and then this one tried to write. Ticket's @Version made
+    // the UPDATE match no row, so Hibernate threw instead of overwriting the
+    // other change, and Spring translated that into this exception.
+    //
+    // 409 and not 500: nothing is broken, the client is simply out of date.
+    // Reloading and trying again is the fix, and only the client can do it,
+    // because only the person knows whether their change still makes sense
+    // on top of the other one. Retrying here, on the server, would just be
+    // the lost update again with extra steps.
+    //
+    // On updateTicket and assignTicket it's thrown at commit, by the
+    // @Transactional proxy, after the method body has returned. That is
+    // still inside Spring MVC's call to the controller, so it lands here.
+    //
+    // The same pattern as the 403: one fixed message for the client, the
+    // detail (which entity, which id, the caller, the request) at WARN. A
+    // stream of these on one ticket is worth a look in the log: two people
+    // fighting over it, or a client that retries without reloading.
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    public ResponseEntity<ApiError> handleConcurrentChange(ObjectOptimisticLockingFailureException exception,
+                                                           HttpServletRequest request) {
+        log.warn("409 CONFLICT on {} {} for {}: {} {} was changed by another request since it was read ({})",
+                request.getMethod(), request.getRequestURI(), describeCaller(),
+                exception.getPersistentClassName(), exception.getIdentifier(), exception.getMessage());
+        return respond(HttpStatus.CONFLICT, ApiError.concurrentChange());
     }
 
     private static String describeCaller() {
