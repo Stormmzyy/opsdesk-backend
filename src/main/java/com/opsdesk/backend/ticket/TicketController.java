@@ -1,10 +1,18 @@
 package com.opsdesk.backend.ticket;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.validation.Errors;
+import org.springframework.validation.Validator;
+import org.springframework.web.bind.WebDataBinder;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.InitBinder;
 import org.springframework.web.bind.annotation.ModelAttribute;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -13,6 +21,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.context.request.WebRequest;
 
 import com.opsdesk.backend.user.AppUser;
 
@@ -79,15 +88,16 @@ public class TicketController {
     // (NOTES.md, decisions 4 and 8.)
 
     // GET /api/v1/tickets -> 200. Two shapes, chosen by the query string:
-    //   - none of page, size, status or search sent: the plain v1 JSON array
-    //     of every ticket. An empty list is still a 200 with [], not a 404.
+    //   - none of page, size, status, priority, team or search sent: the plain
+    //     v1 JSON array of every ticket. An empty list is still a 200 with [],
+    //     not a 404.
     //   - any of them sent: the contract's paginated envelope (TicketPage).
     // The return type is Object because the two answers have different
     // shapes; Jackson writes whichever one is returned.
     //
     // @ModelAttribute builds TicketListParams from the query string, and
-    // @Valid checks it. A bad page, size or status never reaches this method:
-    // GlobalExceptionHandler answers VALIDATION_ERROR naming the parameter.
+    // @Valid checks it. A bad or repeated parameter never reaches this
+    // method: GlobalExceptionHandler answers VALIDATION_ERROR naming it.
     //
     // Both shapes contain only the tickets the caller may see: a USER's list
     // is her own tickets, and her page's totals count only those.
@@ -102,8 +112,56 @@ public class TicketController {
         long page = params.pageNumber();
         int size = params.pageSize();
         return TicketPage.from(
-                ticketService.findTickets(page, size, params.statusValue(), params.searchText(), actor),
+                ticketService.findTickets(page, size, params.filters(), actor),
                 page, size);
+    }
+
+    // A list parameter sent more than once (?status=OPEN&status=CLOSED) is a
+    // 400 VALIDATION_ERROR on that parameter: "Status can only be sent once."
+    //
+    // Why it needs checking at all: Spring binds repeated values into one
+    // String by joining them with commas. For status that fails @OneOf with a
+    // misleading message ("must be one of"); for search it silently searched
+    // for the literal text "printer,laptop", a 200 with the wrong answer.
+    // Taking the first or the last would be an arbitrary guess, and treating
+    // it as "either" would be a feature the contract doesn't have. Refusing
+    // it keeps that door open (NOTES.md, the filtering decision).
+    //
+    // @InitBinder("ticketListParams") runs only for listTickets' parameter
+    // object, before @Valid. The check is put FIRST among the binder's
+    // validators: GlobalExceptionHandler keeps the first message per field,
+    // and a repeated status also fails @OneOf, so this message must come
+    // first to be the one the client sees.
+    @InitBinder("ticketListParams")
+    void refuseRepeatedListParameters(WebDataBinder binder, WebRequest request) {
+        List<Validator> validators = new ArrayList<>();
+        validators.add(new SentOnceValidator(request.getParameterMap()));
+        validators.addAll(binder.getValidators());
+        binder.replaceValidators(validators.toArray(Validator[]::new));
+    }
+
+    private static final class SentOnceValidator implements Validator {
+
+        private final Map<String, String[]> query;
+
+        SentOnceValidator(Map<String, String[]> query) {
+            this.query = query;
+        }
+
+        @Override
+        public boolean supports(Class<?> type) {
+            return TicketListParams.class.equals(type);
+        }
+
+        @Override
+        public void validate(Object target, Errors errors) {
+            TicketListParams.LABELS.forEach((name, label) -> {
+                String[] values = query.get(name);
+                if (values != null && values.length > 1) {
+                    errors.rejectValue(name, "sentOnce", label + " can only be sent once.");
+                }
+            });
+        }
     }
 
     // GET /api/v1/tickets/{id} -> 200, or 404 via GlobalExceptionHandler.

@@ -7,7 +7,6 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
-import org.springframework.data.jpa.domain.Specification;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -52,28 +51,29 @@ public class TicketService {
     // returns rows in whatever order they sit on disk. (NOTES.md, decision 7.)
     //
     // Only the tickets this caller may see: every ticket for ADMIN, MANAGER
-    // and AGENT, only her own for a USER (TicketSpecifications.visibleTo).
+    // and AGENT, only her own for a USER. The repository applies that itself:
+    // findVisible is the only list query it has, and it takes the caller
+    // (TicketQueriesImpl).
     public List<Ticket> listTickets(AppUser actor) {
-        return ticketRepository.findAll(TicketSpecifications.visibleTo(actor), Sort.by("id"));
+        return ticketRepository.findVisible(actor, TicketFilters.NONE, Sort.by("id"));
     }
 
-    // One page of tickets, optionally filtered by status and search text.
-    // page is 1-based, as the contract counts; status and search may be null.
+    // One page of tickets, filtered by any of status, priority, team and
+    // search text. page is 1-based, as the contract counts.
     //
-    // The visibility condition is part of the same Specification, so it's in
-    // the WHERE clause of both the page query and the count query: a USER's
-    // totalItems and totalPages count only her own tickets.
-    public Page<Ticket> findTickets(long page, int size, TicketStatus status, String search, AppUser actor) {
-        Specification<Ticket> filters = TicketSpecifications.matching(status, search)
-                .and(TicketSpecifications.visibleTo(actor));
-
+    // Visibility isn't added here, and can't be forgotten here: the service
+    // has no way to run a ticket query without passing the caller.
+    // TicketQueriesImpl starts every WHERE clause from her visibility, so it's
+    // in both the page query and the count query, and a USER's totalItems and
+    // totalPages count only her own tickets.
+    public Page<Ticket> findTickets(long page, int size, TicketFilters filters, AppUser actor) {
         // A page so far out that its first row would be past row 2,147,483,647
         // can't be asked for: Hibernate's offset is an int, and the request
         // would crash with a 500. No table here is that big, so the page is
         // certainly past the last one. The contract says that's a 200 with no
         // items and the real totals, so answer exactly that with a count.
         if (page - 1 > Integer.MAX_VALUE / size) {
-            return new PageImpl<>(List.of(), Pageable.unpaged(), ticketRepository.count(filters));
+            return new PageImpl<>(List.of(), Pageable.unpaged(), ticketRepository.countVisible(actor, filters));
         }
 
         // The off-by-one: the contract's pages start at 1 ("page=1" is the
@@ -87,7 +87,7 @@ public class TicketService {
         // order for each query, so page 1 and page 2 could overlap or skip
         // tickets, and an update could move a ticket from one page to another.
         Pageable pageable = PageRequest.of((int) (page - 1), size, Sort.by("id"));
-        return ticketRepository.findAll(filters, pageable);
+        return ticketRepository.findVisible(actor, filters, pageable);
     }
 
     // orElseThrow turns "no such ticket" into an exception right here, so every
@@ -278,7 +278,7 @@ public class TicketService {
 
     // View: ADMIN, MANAGER and AGENT see every ticket; a USER sees only the
     // tickets she created. The list applies the same rule as a query
-    // (TicketSpecifications.visibleTo); this is the single-ticket form.
+    // (TicketQueriesImpl.visibleTo); this is the single-ticket form.
     //
     // The one rule that answers instead of throwing. The other three throw
     // AccessDeniedException, which becomes a 403. A view refusal must not
