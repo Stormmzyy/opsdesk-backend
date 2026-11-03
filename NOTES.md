@@ -229,3 +229,191 @@ Spring's tools for this are already on the classpath, through the per-feature te
 - **`@DataJpaTest`** starts only JPA and the repositories, against a real database, to check queries such as `findByStatus` and the paged, sorted search. In Boot 4 it's `org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest`; in Boot 3 it was `org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest`.
 
 **Noted, not fixed.** The curl checks recorded in each PR are the specification these tests should encode, starting with the error shape and the check order, because those are the easiest to break without noticing.
+
+## Week 7: auth and permissions
+
+Decided before Tuesday of Week 7, when sign-in and roles arrive. These are decisions only: **API_CONTRACT.md is not edited until Thursday**, as the Week 7 guide specifies. Until then, the contract still describes the old design, and the decisions below say where it is going to change.
+
+### 18. Auth moves to `POST /api/v1/auth/register` and `POST /api/v1/auth/login`
+
+**What the contract says now.** Register is `POST /users` and login is `POST /sessions`. Its Paths convention explains why: "No verbs in paths. The HTTP method says what happens", so logging in is "create a session" and registering is "create a user", "not `/login` and `/register`".
+
+**Why it's overridden.** Two reasons:
+- The Week 7 guide specifies `/auth/register` and `/auth/login`.
+- Register can't require sign-in, because nobody has an account yet. But `GET /users` will require sign-in. With register at `POST /users`, one path would have two different auth rules depending on the method: open for `POST`, closed for `GET`. That's easy to get wrong in the security config, and easy to break later. Under `/auth/**`, the rule is simple: everything under `/auth` is open, and everything else needs a signed-in user.
+
+**What doesn't change.** The "no verbs in paths" convention still holds everywhere else. `/auth/register` and `/auth/login` are the one deliberate exception, and the contract will say so on Thursday, rather than leaving the convention and the paths contradicting each other. `POST /users` and `POST /sessions` go away; `/sessions` also comes out of the Paths list.
+
+### 19. The login response gains a token
+
+**What the contract says now.** `POST /sessions` returns only `{ "user": { ... } }`. It says how the session reaches the browser is "a Week 8 decision" and gives two options: an `httpOnly` cookie, or a token in the response body.
+
+**Decided: a JWT in the response body.** The frontend sends it back on every request in an `Authorization: Bearer <token>` header. The body gains the token alongside the existing `user` object. The exact field names follow the guide and are fixed in the contract on Thursday.
+
+### 20. Login answers 200, not 201
+
+**What the contract says now.** `201 Created`, because "a session was created".
+
+**Why that no longer holds.** A JWT is stateless. The server checks a token by its signature alone, and keeps no record of sessions, so logging in creates nothing on the server. With nothing created, 201 would be wrong, so a successful login is **200 OK**: the request worked, and the body is the result.
+
+Register keeps **201**, because it really does create something: a new row in `app_user`.
+
+### 21. `403 FORBIDDEN` joins the error codes and the status codes
+
+The contract says its error code list "is the complete list. The backend must not invent others without updating this document." The permission table (README, Permissions) needs an answer for **"we know who you are, and the answer is no"**: for example, a signed-in AGENT trying to delete a ticket. 401 doesn't fit, because it means "we don't know who you are". So the contract gains:
+
+- **`FORBIDDEN`, 403**, in the error codes table: the caller is signed in, but their role or their relationship to the ticket doesn't allow this action.
+- **403 Forbidden** in the status codes table, mapped to `FORBIDDEN`.
+
+At the same time, `UNAUTHORIZED` loses its "(From Week 8, also: …)" wording, because it now covers both cases: a login with the wrong email or password, and a request that needs a signed-in user but has no valid token.
+
+### 22. The check order gains 401 and 403
+
+**What the contract says now.** It only gives the order 404, then `BAD_REQUEST`, then `VALIDATION_ERROR` (decision 3). It says nothing about 401 or 403.
+
+**Decided.** When a request has more than one problem, the server answers with the first of these that applies:
+
+1. **401 `UNAUTHORIZED`**: no valid token. This is checked before anything else, because the security filter runs before the request reaches any controller. It also applies to paths that don't exist (decision 24).
+2. **403 `FORBIDDEN`, for role rules**: the caller's role can never do this, whichever ticket it is. For example, a MANAGER deleting a ticket, or an AGENT listing users. The rule doesn't depend on the ticket, so it's checked before the ticket is looked up. A MANAGER deleting ticket 999 gets 403, not 404. That reveals nothing, because the answer is the same for every id.
+3. **404 `NOT_FOUND`**: the ticket doesn't exist, **or** it exists but the caller isn't allowed to see it (decision 23).
+4. **403 `FORBIDDEN`, for ticket rules**: the caller can see the ticket but can't make this change. For example, an AGENT editing a ticket that isn't assigned to them, or a USER editing their own ticket that is no longer `OPEN`.
+5. **400 `BAD_REQUEST`**: the body can't be read.
+6. **400 `VALIDATION_ERROR`**: the body was read, but fields break the rules.
+
+**Why the 404 and ticket-rule 403 come before the body checks.**
+- **The 404 stays ahead of the 400s for consistency, not for security.** That order has been in the contract since Week 4 and built since Week 6 (decision 3). It was justified there by a `PATCH` to a missing ticket, which should say "not found" rather than complain about the body. Putting the 400s first wouldn't leak anything either: a broken body would answer 400 for a hidden ticket, a missing one and the caller's own alike, so they couldn't be told apart. But reordering now would rewrite a rule that's already built, documented and tested, for no gain.
+- **Permission is about who; the body is about what.** There's no point telling a caller their body is invalid for a change they aren't allowed to make at all.
+
+**On the two open endpoints, `/auth/register` and `/auth/login`,** there's no token to check, so steps 1 to 4 don't apply. Login checks `BAD_REQUEST`, then `VALIDATION_ERROR`, and only then the credentials. A wrong email or password is a **401** that comes last, because the credentials can't be checked until the body has been read.
+
+**What this costs to build.** Spring reads the body *before* the controller method runs, so steps 3 and 4 don't happen in that order on their own. The fix from decision 6 already puts the 404 before `BAD_REQUEST`: when a body can't be read, the exception handler checks first whether the ticket exists. That check now also has to ask whether the caller can see the ticket, and whether they can change it. Assigning has its own endpoint (decision 27), so its role check happens before the body is read, like every other role rule.
+
+### 23. Fetching a ticket you aren't allowed to see answers 404, not 403, on purpose
+
+A USER can only see their own tickets. When a USER asks for someone else's ticket by id (`GET /tickets/7`), the answer is **404 `NOT_FOUND`**, exactly the same as for an id that doesn't exist. **403 would be the wrong answer**, because it would tell the caller that ticket 7 exists and belongs to someone else, which lets anyone count and probe other people's tickets.
+
+The same rule applies to `PATCH` on a ticket the caller can't see, and `GET /tickets` simply leaves those tickets out of the list.
+
+**This looks like a bug to anyone who doesn't know it's deliberate.** A tester who sees a ticket in the database and gets 404 for it will reasonably report it. So it is written down in two places:
+- **in the contract on Thursday**, as part of the 404 rule
+- **in a code comment, at the visibility check itself**, added with that check on Tuesday, so nobody "fixes" it to 403
+
+### 24. A request with no valid token to a path that doesn't exist answers 401, not 404
+
+**What happens today.** `GET /api/v1/nothing-here` answers **404 `NOT_FOUND`** with "Nothing exists at /api/v1/nothing-here." That comes from the `NoResourceFoundException` handler in `GlobalExceptionHandler`, built in Week 6. The contract describes it: 404 covers "a path that doesn't exist".
+
+**What changes.** The security filter checks the token before Spring works out which controller a path belongs to (decision 22, step 1). So a caller with no valid token who asks for a path that doesn't exist gets **401 `UNAUTHORIZED`**, not the Week 6 404 body. A signed-in caller still gets the 404.
+
+**Deliberate, and a security improvement.** A caller who isn't signed in gets the same 401 for every path, real or not, so they can't map out which endpoints exist. The same applies to decision 12: an unsupported method such as `PUT /tickets/1` answers 401 instead of 404 when there's no token.
+
+**It changes documented and tested behaviour, so both are updated on Thursday.**
+- **The contract:** the 404 rule says "a path that doesn't exist" with no condition. It gains "for a signed-in caller", and the check order says 401 comes first.
+- **The tests:** no automated test covers the unknown-path 404 today. The only tests are `contextLoads` and `TicketServiceTest` (decision 17). It was checked by hand with curl, and that curl check is what changes: it now needs a token to get the 404, and without one it should expect 401. Any controller test written before Thursday that requests an unknown path has to send a token or expect 401.
+
+### 25. The development database is recreated, not migrated
+
+**The problem.** Tuesday adds `passwordHash` and `role` to `AppUser`, both non-null, and `createdBy` to `Ticket` (decision 27). `ddl-auto: update` turns that into `alter table app_user add column … not null`, and PostgreSQL refuses it on a table that already has rows, because the six seeded users would have no value for the new column. Hibernate logs the failure as a warning and starts anyway. The columns are never created, but the app looks healthy: the ticket endpoints still work, and `contextLoads` still passes. Meanwhile every endpoint that loads a user (`GET /users`, register, login) answers 500. The seeder can't repair this either, because it skips any table that isn't empty.
+
+**The decision.** Recreate the database: `docker rm -f opsdesk-db`, then the README's `docker run` command. Nothing is lost, because everything in the database is seed data. A fresh database gets both columns as `NOT NULL` from the start, and the seeder creates the six users with a password hash and a role. The README tells anyone with an older database to do the same, next to the existing `ALTER TABLE` note.
+
+**Rejected:**
+- **Hand-run SQL** (add the columns as nullable, fill them in, then `SET NOT NULL`): it needs real bcrypt hashes from the app's `PasswordEncoder`, and it's one more manual step that every database needs and nothing announces.
+- **Adding the columns as nullable, then switching to `nullable = false`**: `ddl-auto: update` never tightens an existing column, so the database would never get `NOT NULL`, and the entity and the table would silently disagree (decision 9).
+
+**Flyway is still the real answer**, as decision 9 says: a versioned migration would make this change once and apply it to every database automatically. It's still out of scope this week.
+
+### 26. Email is stored and compared in lowercase
+
+**The problem.** The contract says email is "compared without regard to case", but the unique constraint on `app_user.email` is case-sensitive. `Ama@example.com` and `ama@example.com` could both register, so two accounts could exist for one address. That breaks the contract's 409 rule (an email that's already taken must be refused), and it makes login ambiguous: two accounts could match one email.
+
+**The decision.** The backend lowercases the email at every boundary:
+- **Register** lowercases the email *before* checking for a duplicate and before saving it. The stored value is therefore always lowercase, and the existing unique constraint enforces case-insensitive uniqueness by itself.
+- **Login** lowercases the email before looking it up.
+
+**Rejected: a functional unique index on `lower(email)`.** It would enforce the rule in the database itself, even against a bug in the code. But the stored value would still be whatever case the user typed, so every lookup would have to remember to compare with `lower()` on both sides, and the value a response returns would be unpredictable. Lowercasing on the way in gives one stored form that every query can match exactly.
+
+### 27. The seed data is designed to test every cell of the permission table
+
+**`createdBy` arrives on Tuesday, not Wednesday.** `Ticket` gains a `createdBy` column (a many-to-one link to `app_user`, like `assignee`) on Tuesday. The ownership rules that use it ("own only", "own, if OPEN") are still enforced on **Wednesday**, as the guide specifies. Adding the column a day early has two benefits:
+- **One database recreate, not two.** Adding a required column to a populated table fails in the same way decision 25 describes. Adding `createdBy` on Wednesday would mean recreating the database a second time.
+- **The seeder lays out ownership once.** It sets roles, assignments and creators together, from the tables below.
+
+**The seeder implements these tables. It doesn't invent data.** If the seeder and this decision disagree, the seeder is wrong.
+
+#### Users
+
+| User | Role | Why this role |
+| --- | --- | --- |
+| Priya Sharma | ADMIN | She has no assigned tickets, so she can be the admin without anyone's work moving. |
+| Kwame Asante | MANAGER | He creates the unassigned ticket the manager tests use (#2), and keeps his own assignment (#7). |
+| Daniel Mensah | AGENT | He has two assigned tickets (#1, #10). He is the main agent for the "edit assigned" tests. |
+| Liam Carter | AGENT | One assigned ticket (#3). It belongs to a *different* agent from Daniel's. |
+| Marco Silva | AGENT | One assigned ticket (#5). |
+| Fatima Bello | USER | The only USER. She creates #4 and #9, and is assigned nothing. |
+
+That's 1 ADMIN, 1 MANAGER, 3 AGENT and 1 USER. **Only one assignment changes:** #9 used to be assigned to Fatima, and is now unassigned. A USER doesn't work tickets, and the ticket is already `RESOLVED`. Every other assignment stays as it was in Week 6.
+
+#### Tickets
+
+| # | Title | Status | Created by | Assigned to | Here to prove |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Login page times out on slow networks | OPEN | Priya | Daniel | AGENT edits a ticket assigned to them: allowed |
+| 2 | Order new laptops for the March starters | OPEN | Kwame | none | MANAGER edits but can't delete; USER can't see someone else's ticket (404, decision 23); MANAGER assigns |
+| 3 | Customer cannot reset their password | OPEN | Liam | Liam | AGENT edits a ticket assigned to *another* agent: refused |
+| 4 | Update the holiday policy document | OPEN | **Fatima** | none | USER edits her own `OPEN` ticket: allowed |
+| 5 | Fix rounding error in monthly invoices | IN_PROGRESS | Kwame | Marco | (background) |
+| 6 | Add dark mode to the admin panel | IN_PROGRESS | Priya | none | AGENT edits a ticket assigned to nobody: refused |
+| 7 | Office air conditioning is broken | IN_PROGRESS | Liam | Kwame | (background) |
+| 8 | Reply to the backlog of refund emails | RESOLVED | Liam | none | (background) |
+| 9 | Schedule onboarding for new hires | RESOLVED | **Fatima** | none | USER edits her own ticket that isn't `OPEN`: refused |
+| 10 | Rotate the expired API keys | RESOLVED | Daniel | Daniel | (background) |
+| 11 | Close the Q3 expense reports | CLOSED | Marco | none | (background) |
+| 12 | Replace the broken meeting room screen | CLOSED | Kwame | none | (background) |
+
+Titles, descriptions, priorities, teams, projects and statuses are unchanged from Week 6. Only `createdBy` is new, and #9 loses its assignee.
+
+#### The checks: one or more per permission-table cell
+
+| Cell | Caller | Request | Expected |
+| --- | --- | --- | --- |
+| View tickets: ADMIN, MANAGER, AGENT see all | Priya, Kwame, Daniel | `GET /tickets` | 200, all 12 |
+| View tickets: USER sees own only | Fatima | `GET /tickets` | 200, only #4 and #9 |
+| View tickets: USER, someone else's ticket | Fatima | `GET /tickets/2` | **404**, the same body as `GET /tickets/999` (decision 23) |
+| Create ticket: everyone | each of the four roles | `POST /tickets` | 201, with `createdBy` set to the caller |
+| Edit ticket: ADMIN any | Priya | `PATCH /tickets/3` | 200 |
+| Edit ticket: MANAGER any | Kwame | `PATCH /tickets/2` | 200 |
+| Edit ticket: AGENT, assigned | Daniel | `PATCH /tickets/1` | 200 |
+| Edit ticket: AGENT, not assigned to anyone | Daniel | `PATCH /tickets/6` | **403** |
+| Edit ticket: AGENT, assigned to someone else | Daniel | `PATCH /tickets/3` | **403** |
+| Edit ticket: USER, own and `OPEN` | Fatima | `PATCH /tickets/4` with `title` or `description` | 200 |
+| Edit ticket: USER, own and `OPEN`, a field she may not change | Fatima | `PATCH /tickets/4` with `status`, `priority` or `team` | **403** |
+| Edit ticket: USER, own but not `OPEN` | Fatima | `PATCH /tickets/9` | **403** |
+| Edit ticket: USER, not own | Fatima | `PATCH /tickets/2` | **404** (she can't see it) |
+| Assign ticket: ADMIN, MANAGER | Priya, Kwame | `PATCH /tickets/2/assignee`, to Liam | 200 |
+| Assign ticket: AGENT | Daniel | `PATCH /tickets/1/assignee`, to Marco | **403** |
+| Assign ticket: USER | Fatima | `PATCH /tickets/4/assignee`, to anyone | **403** |
+| Delete ticket: ADMIN | Priya | `DELETE` a ticket created during the test | 204 |
+| Delete ticket: MANAGER | Kwame | `DELETE /tickets/2` | **403** (role rule, decision 22) |
+| Delete ticket: AGENT, USER | Daniel, Fatima | `DELETE /tickets/1`, `DELETE /tickets/4` | **403** |
+| List users: ADMIN, MANAGER | Priya, Kwame | `GET /users` | 200 |
+| List users: AGENT, USER | Daniel, Fatima | `GET /users` | **403** |
+
+**Rules for running these checks, so the seed data stays usable:**
+- **Never delete a seeded ticket to prove that ADMIN can delete.** The seeder only fills empty tables, so a deleted seed ticket never comes back without recreating the database. Create a ticket, then delete that one.
+- **Change `title`, not `status`, in the edit checks.** Moving #4 off `OPEN` would destroy the only "own and `OPEN`" case.
+- **Assigning #2 changes who it's assigned to.** Run the agent checks before it, or set it back afterwards.
+
+**Two questions this table left open, now decided:**
+
+**Assigning is its own endpoint: `PATCH /api/v1/tickets/{id}/assignee`.** It is not a field in the ticket `PATCH` body. The reasons:
+- **Assigning and editing are separate rows of the permission table, with different permissions.** An AGENT may edit a ticket assigned to them but may not assign it. A combined request could mix a change the caller is allowed to make with one they aren't, and the server would have to refuse the whole request or apply half of it.
+- **The role check can run before the body is read.** That's where the check order puts it (decision 22, step 2). AGENTs and USERs are refused by method and path alone, without the server reading or validating anything.
+- **It keeps the "no verbs in paths" convention.** `assignee` is a noun: the request changes one field of the ticket, just as `PATCH /tickets/{id}` changes others.
+
+**A USER editing her own `OPEN` ticket may change `title` and `description` only.** She can't change `status`, `priority` or `team`. **The reason is a trap in the wider reading.** If a USER could change the status, she could move her own ticket to `IN_PROGRESS`. At that moment it is no longer `OPEN`, so she loses the right to edit it. She also can't move it back, because reopening it would itself be an edit. One request would lock her out of her own ticket, with no way back. Limiting her to title and description means nothing she is allowed to do can take that right away.
+
+### Comments in `AppUser` that this week makes wrong
+
+Two comments in `AppUser.java` say things arrive in **Week 8**: the password hash, and the `409 CONFLICT` for registering a taken email. Both arrive tomorrow, in Week 7, so both comments become wrong. They're fixed as part of Tuesday's work, not separately.
+
+The contract has the same Week 8 wording in five places: the `UNAUTHORIZED` row, the `GET /users` failure note, both paragraphs of the Auth intro, and the `POST /sessions` 201 note. All of it is reworded together on Thursday (decisions 18 to 24).
