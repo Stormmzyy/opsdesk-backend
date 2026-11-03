@@ -412,6 +412,55 @@ Titles, descriptions, priorities, teams, projects and statuses are unchanged fro
 
 **A USER editing her own `OPEN` ticket may change `title` and `description` only.** She can't change `status`, `priority` or `team`. **The reason is a trap in the wider reading.** If a USER could change the status, she could move her own ticket to `IN_PROGRESS`. At that moment it is no longer `OPEN`, so she loses the right to edit it. She also can't move it back, because reopening it would itself be an edit. One request would lock her out of her own ticket, with no way back. Limiting her to title and description means nothing she is allowed to do can take that right away.
 
+**`createdBy` is required, not nullable.** Every ticket has a creator by definition. The seeder supplies one for each seeded ticket, and the logged-in user supplies one for each new ticket, so there is no legitimate null. Making the column `NOT NULL` has two benefits:
+- **The ownership rules carry no null checks.** "Own only" and "own, if OPEN" compare `createdBy` with the caller, and that comparison can never meet a ticket with no owner.
+- **An ownerless ticket can't be created by accident.** A code path that forgets to set the creator fails on insert instead of quietly saving a ticket nobody owns.
+
+### 28. The filter uses the role from the database, not the role in the token
+
+**The decision.** `JwtAuthFilter` takes only the email from the token. On every request it loads that user from the database and uses the role stored there. The token's `role` claim is never used for a permission decision. It exists only as a hint for the frontend, so it can show or hide actions without another request.
+
+**The reason.** A role changed in the database takes effect on the next request. If the filter trusted the claim instead, a demoted user would keep their old role until the token expired, up to 60 minutes (`app.jwt.expiry-minutes`). A token can't be withdrawn once it's issued, so the claim would outrank the database for that whole time.
+
+**The cost** is one database query per authenticated request. That is the deliberate trade: one indexed lookup by email (the unique constraint is an index) in exchange for permissions that are never out of date. Loading the user also catches a deleted account: a valid token for a user who no longer exists is treated as no valid token, and the request gets a 401.
+
+### 29. Passwords are limited to 72 bytes of UTF-8
+
+**The problem.** BCrypt only uses the first 72 bytes of a password. Spring Security 7 refuses longer input with `IllegalArgumentException: password cannot be more than 72 bytes` rather than silently truncating it. Refusing is the better behaviour, because with silent truncation two different long passwords that share their first 72 bytes would hash identically. But the exception reached the catch-all handler, so registering with an 80-character password answered **500**.
+
+**The decision.** Register validates the length in the contract's error shape: a password over 72 bytes is a `400 VALIDATION_ERROR` with the message `Password must be at most 72 bytes.`
+- **The limit is counted in bytes, not characters.** In UTF-8 one character takes one to four bytes, so 72 bytes can be anywhere from 18 to 72 characters.
+- **The message says bytes for the same reason.** "At most 72 characters" would be wrong for non-ASCII input: a 30-character password could be refused while the message said it was allowed.
+- Login doesn't validate the length (it only checks that both fields are present). An over-long password there simply doesn't match, and gets the ordinary 401.
+
+**Rejected: pre-hashing** (SHA-256 the password, then BCrypt the result). It removes the limit, but adds a step to every hash and every check, for an edge case nobody hits.
+
+**The contract change goes in on Thursday.**
+
+### 30. Usernames are stored and compared in lowercase, like emails
+
+The contract's username rule allows letters in either case, and the unique constraint on `app_user.username` is case-sensitive, so `Ama.Owusu` and `ama.owusu` could both register. That has now been changed: the username is lowercased before the duplicate check and before saving, exactly as decision 26 does for email.
+
+**The reason.** The display name lives in the separate `name` field, so the username is purely an identifier. Identifiers that differ only by case invite impersonation: `@Ama.Owusu` would look like `@ama.owusu` to anyone reading it.
+
+### 31. A taken username answers 409 with its own message
+
+**The problem.** The contract's 409 only covers a taken email. A taken username would reach the database's unique constraint and answer 500.
+
+**The decision.** A taken username answers **`409 CONFLICT`** with `An account with this username already exists.` When both the email and the username are taken, the email message wins: the caller most likely already has an account, and that's the more useful thing to tell them.
+
+**The contract change goes in on Thursday.**
+
+### 32. Register reveals which emails have accounts. This is a known trade-off, not a bug
+
+Login is deliberately silent about which emails exist. A wrong password and an unregistered email get one answer, and login runs a throwaway BCrypt check for an unknown email so that the response time doesn't give it away either. **Register's 409 gives the same information away directly**: try to register an address, and a 409 means it has an account.
+
+**This is inherent to having a 409 at all.** The alternatives are:
+- **Answering 201 regardless, and sending an email** ("you already have an account"). That needs email sending, which OpsDesk doesn't have.
+- **A generic error**, which leaves a real user unable to tell why they can't register.
+
+**Recorded, not fixed,** because the contract specifies the 409.
+
 ### Comments in `AppUser` that this week makes wrong
 
 Two comments in `AppUser.java` say things arrive in **Week 8**: the password hash, and the `409 CONFLICT` for registering a taken email. Both arrive tomorrow, in Week 7, so both comments become wrong. They're fixed as part of Tuesday's work, not separately.
