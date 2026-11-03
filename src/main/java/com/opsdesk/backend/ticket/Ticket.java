@@ -99,10 +99,12 @@ public class Ticket {
     // EAGER (the default for @ManyToOne) would load the project every time a
     // ticket is loaded, whether anyone needs it or not. GET /tickets would then
     // run 1 query for the tickets plus up to 1 more per ticket for its project
-    // (the "N+1 queries" problem), and the same again for the assignee, just to
-    // return six fields that use neither. EAGER also can't be switched off for
-    // one query, while LAZY can be switched on for one query when a page really
-    // needs the project.
+    // (the "N+1 queries" problem), just to return fields that don't use it.
+    // EAGER also can't be switched off for one query, while LAZY can be
+    // switched on for one query when a page really needs it. That's exactly
+    // what happens for the assignee and creator, whose names every response
+    // now includes: they stay LAZY here, and the ticket queries fetch them
+    // with a join (TicketQueriesImpl.withPeople, TicketRepository.findById).
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "project_id")
     private Project project;

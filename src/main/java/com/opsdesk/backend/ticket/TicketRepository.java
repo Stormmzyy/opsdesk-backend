@@ -3,6 +3,7 @@ package com.opsdesk.backend.ticket;
 import java.util.List;
 import java.util.Optional;
 
+import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.repository.Repository;
 
 // Why there's no implementation: Spring Data writes it.
@@ -48,6 +49,19 @@ import org.springframework.data.repository.Repository;
 // query can't do.
 public interface TicketRepository extends Repository<Ticket, Long>, TicketQueries {
 
+    // Loads the ticket with its assignee and creator in the same query (two
+    // left joins), because every single-ticket response includes their names
+    // (NOTES.md, the ticket shape and N+1 decisions). Without it, the names
+    // are lazy proxies, and TicketResponse.from reads them after the session
+    // has closed: a LazyInitializationException, a 500, on GET, PATCH and
+    // both assignee endpoints.
+    //
+    // This works on the bare Repository because findById is DECLARED here:
+    // Spring Data reads @EntityGraph on a declared CRUD method and passes it
+    // to SimpleJpaRepository.findById as a fetch graph. (JpaRepository
+    // users would redeclare it the same way.) The list queries can't use it;
+    // they fetch inside their Specification (TicketQueriesImpl.withPeople).
+    @EntityGraph(attributePaths = {"assignee", "createdBy"})
     Optional<Ticket> findById(Long id);
 
     <S extends Ticket> S save(S ticket);

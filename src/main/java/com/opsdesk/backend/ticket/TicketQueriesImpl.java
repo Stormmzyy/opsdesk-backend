@@ -16,7 +16,9 @@ import com.opsdesk.backend.user.AppUser;
 import com.opsdesk.backend.user.Role;
 
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.criteria.CriteriaQuery;
 import jakarta.persistence.criteria.Expression;
+import jakarta.persistence.criteria.JoinType;
 import jakarta.persistence.criteria.Order;
 
 // The one place a ticket list query is built and run (NOTES.md, the
@@ -76,7 +78,7 @@ class TicketQueriesImpl implements TicketQueries {
     @Override
     @Transactional(readOnly = true)
     public List<Ticket> findVisible(AppUser actor, TicketFilters filters, TicketOrder order) {
-        return executor.findAll(where(actor, filters).and(orderedBy(order)), Sort.unsorted());
+        return executor.findAll(where(actor, filters).and(orderedBy(order)).and(withPeople()), Sort.unsorted());
     }
 
     @Override
@@ -85,7 +87,7 @@ class TicketQueriesImpl implements TicketQueries {
         // Only the number and size are kept: a Sort that arrived inside the
         // Pageable would otherwise override orderedBy's ORDER BY.
         Pageable unsorted = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize());
-        return executor.findAll(where(actor, filters).and(orderedBy(order)), unsorted);
+        return executor.findAll(where(actor, filters).and(orderedBy(order)).and(withPeople()), unsorted);
     }
 
     @Override
@@ -147,6 +149,43 @@ class TicketQueriesImpl implements TicketQueries {
 
     private static Specification<Ticket> hasTeam(Team team) {
         return (root, query, cb) -> cb.equal(root.get("team"), team);
+    }
+
+    // Loads each ticket's assignee and creator in the page query itself, with
+    // two left joins, because every ticket in a response includes their
+    // names (NOTES.md, the N+1 decision). Without it, the names are lazy
+    // proxies read after the session has closed: a 500 for every list.
+    // Before the fix, with a session left open, the same request ran one
+    // query per distinct person on the page.
+    //
+    // LEFT, because a ticket with no assignee must still be listed. Both are
+    // to-one, so the join adds columns, never rows: paging stays in SQL, and
+    // Hibernate has no reason to page in memory.
+    //
+    // THE COUNT-QUERY TRAP. SimpleJpaRepository runs this same Specification
+    // for the COUNT behind a page's totals. A fetch there is invalid: the
+    // count selects count(t), not the ticket, so the fetched assignee has no
+    // owner to attach to. Unguarded, a full first page or any later page
+    // failed with:
+    //   SemanticException: Query specified join fetching, but the owner of
+    //   the fetched association was not present in the select list
+    // and a 500. A first page that wasn't full still worked, because Spring
+    // Data skips the COUNT when it already knows the total, so the bug hid
+    // from any test with a large page size. The guard: the count query's
+    // result type is Long, so skip the fetch there. The count needs no
+    // users anyway; it still gets the visibility condition from where().
+    private static Specification<Ticket> withPeople() {
+        return (root, query, cb) -> {
+            if (!isCountQuery(query)) {
+                root.fetch("assignee", JoinType.LEFT);
+                root.fetch("createdBy", JoinType.LEFT);
+            }
+            return null;
+        };
+    }
+
+    private static boolean isCountQuery(CriteriaQuery<?> query) {
+        return Long.class.equals(query.getResultType()) || long.class.equals(query.getResultType());
     }
 
     // The ORDER BY for a TicketOrder, then id ascending as the tiebreaker

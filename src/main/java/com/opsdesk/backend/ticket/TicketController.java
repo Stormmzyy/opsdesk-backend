@@ -86,8 +86,20 @@ public class TicketController {
     // The rules live in the service.
     //
     // Every ticket leaves through TicketResponse.from, never as the Ticket
-    // entity itself, so the JSON is always exactly the contract's six fields.
+    // entity itself, so the JSON is always exactly the contract's fields.
     // (NOTES.md, decisions 4 and 8.)
+    //
+    // DELIBERATE: the mapping happens HERE, after the service's transaction
+    // has ended, with open-in-view off (NOTES.md, the N+1 decision). The
+    // response reads the assignee's and creator's names, so the query that
+    // loaded the ticket must have fetched them. If one ever doesn't, the
+    // mapping throws LazyInitializationException: a 500 on that endpoint,
+    // every time, the first time a test calls it. Mapping inside the
+    // transaction (or turning open-in-view on) would never crash, and would
+    // quietly run one extra query per person instead: the N+1, back and
+    // invisible. The catch is that the crash only reaches production on an
+    // endpoint no test calls, so every endpoint that returns a ticket needs a
+    // test that calls it.
 
     // GET /api/v1/tickets -> 200. Two shapes, chosen by the query string:
     //   - none of page, size, status, priority, team, search or sort sent:
