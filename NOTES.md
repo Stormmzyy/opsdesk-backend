@@ -874,6 +874,91 @@ It's invalid, not silently wrong, and the client got a 500.
 
 **Why it's left as it is.** It can't happen. `created_by_id` is NOT NULL with a foreign key to `app_user`, so the database refuses to delete a user who created tickets, and refuses a ticket without a creator. It's recorded because it's the one place where a broken invariant would hide instead of crash. If the foreign key is ever relaxed (for example, to let users be deleted), revisit it: make the join LEFT, so the missing creator fails loudly in the mapping instead.
 
+### 56. One index: `(created_by_id, id)`. How it was measured, and what it changed
+
+**PostgreSQL does not index foreign key columns.** It indexes primary keys and unique constraints by itself, nothing else. So `ticket` had only `ticket_pkey`. `created_by_id` was unindexed, although it's in the visibility condition of every list query a USER makes; so were `assignee_id` and `project_id`.
+
+**The experiment.** It ran in a throwaway `index_lab` schema in the dev PostgreSQL, never in `public`, whose exact decision 27 matrix the walk depends on.
+- **The tables** were the app's own, copied with `CREATE TABLE … (LIKE public.… INCLUDING ALL)`, plus the two foreign keys, which `LIKE` doesn't copy. They had the same columns, checks, primary key and unique constraints, and the same missing foreign-key indexes.
+- **It ran on PostgreSQL 16.15 with the default 128 MB `shared_buffers`,** so the whole data set was in cache once warm.
+- **`VACUUM ANALYZE` ran before every measurement.** `ANALYZE` gives the planner real statistics. `VACUUM` sets the visibility map, without which an "index-only" scan still reads the heap.
+- **Each query** was run 7 times through `EXPLAIN (ANALYZE, BUFFERS)`, and the median is reported; the first, cold run excluded.
+- **The queries** were the app's real SQL: both left joins, `offset 0 rows fetch first 10 rows only`, literal values.
+
+**The data.** 5,000 tickets (200 heap pages, 1.6 MB) and 200 users, from a fixed seed. The distribution decides which indexes help, so here it is:
+- **Users:** 1 ADMIN, 5 MANAGER, 40 AGENT, 154 USER.
+- **Creators:** USERs raised 79%, deliberately skewed (`random()²`): per USER the minimum is 7, the median 19, the maximum 335. AGENTs raised 19% and MANAGERs 2%, uniformly.
+- **Status:** OPEN 14.7%, IN_PROGRESS 15.0%, RESOLVED 25.4%, CLOSED 44.9%. That's four values.
+- **Assignees:** OPEN tickets 59% unassigned, others about 5%, spread over 40 agents.
+- **Priority:** 29 / 40 / 23 / 8 %. **Team:** uniform.
+- **Search:** 156 tickets mention "printer".
+
+Queries 1 and 2 were measured for three USERs: sparse (user 142, 7 tickets), median (93, 19) and heavy (47, 335). The best plan depends on how many tickets the user has.
+
+**Before and after, with only `(created_by_id, id)` added** (post-vacuum baseline):
+
+| Query | Before | After | Plan, before → after |
+| --- | --- | --- | --- |
+| USER list, sparse (7) | 1.192 ms | 0.128 ms | walks all of `ticket_pkey`, Filter removes 4,993 → `Index Scan … Index Cond: (created_by_id = ?)`: **no Sort, no Filter**, reads 7 entries |
+| USER list, median (19) | 0.640 ms | 0.147 ms | walks `ticket_pkey`, Filter removes 2,522 → the same Index Scan, reads 10 |
+| USER list, heavy (335) | 0.167 ms | 0.143 ms | walks `ticket_pkey`, Filter removes 194, **unchanged**: at 6.7% of the table, id order fills 10 just as fast |
+| USER list + status, median | 1.089 ms | 0.163 ms | seq scan, Filter removes 4,998, Sort → bitmap on her 19 rows, status Filter, Sort of 2 |
+| COUNT for a USER, median / heavy | 0.98 / 1.00 ms | 0.061 / 0.100 ms | seq scan → **Index Only Scan, `Heap Fetches: 0`** |
+| COUNT for USER + status, median | 1.03 ms | 0.109 ms | seq scan → bitmap on her rows plus a status Filter |
+| ADMIN list, `status=OPEN` / `CLOSED` | 0.120 / 0.109 ms | 0.115 / 0.107 ms | walks `ticket_pkey`, unchanged |
+| ADMIN COUNT, unfiltered | 0.588 ms | 0.584 ms | Index Only Scan of `ticket_pkey`, all 5,000 entries, unchanged (decision 58) |
+| ADMIN search "printer" | 8.894 ms | 7.771 ms | seq scan, unchanged (decision 58) |
+
+**Read it as growth, not milliseconds.** At 5,000 rows everything is under 10 ms, so a verdict in milliseconds invites "no index is needed".
+- **A USER's page without the index grows with the table.** The primary-key walk reads about N × 10 / k rows before it fills a page, where k is her ticket count. For a USER with fewer than 10 tickets it reads **all N**, in random heap order, on every request. That's half a million rows at 500,000 tickets, and the users with the *fewest* tickets pay the most. **With the index it stays roughly constant:** one descent, then 10 entries.
+- **A USER's COUNT without the index is a full seq scan,** so it's linear in the table, and it runs on every full first page and every later page. With the index it's an index-only scan of her own entries: about k, which grows with her activity, not with the table. Because the COUNT had no fast path at all, this is the bigger of the two wins.
+- **It also serves the foreign-key check** on `created_by_id` when a user row is deleted, because `created_by_id` is the leading column.
+
+**What it costs:** 176 kB at 5,000 rows, about 3.5 times the 56 kB single-column index, because it carries `id`. Plus one extra index write on every insert, and on any update that changes `created_by_id` (none do).
+
+**Declared on the entity, not in SQL:** `@Table(indexes = @Index(name = "ix_ticket_created_by_id_id", columnList = "created_by_id, id"))` on `Ticket`. The schema is built from the entities, so a hand-made index would vanish on the next recreate, and a production schema would never have it. Verified: the recreated dev schema has it.
+
+### 57. The indexes measured and rejected
+
+Every index costs space and a write on every insert and update. One that no plan uses is worse than none, because it looks like it's doing something. Each was measured on its own against the same baseline.
+
+- **`created_by_id` alone** (56 kB). It does help: the sparse USER's list drops to 0.21 ms, and the Filter is gone. But the **Sort stays**, because rows come back in creator order and the page wants id order. And its COUNT is a bitmap **heap** scan, because Hibernate counts `count(t.id)` and `id` isn't in this index. `(created_by_id, id)` does everything this does and more. **Rejected: dominated.**
+- **`(created_by_id, status)`** (80 kB). Q2's two conditions both become an `Index Cond`, so the Filter is gone, but the **Sort stays**. And a USER's plain list and its COUNT fall back to a bitmap heap scan plus a Sort. **Rejected:** worse for the common case to help a rarer one.
+- **`(created_by_id, status, id)`** (232 kB). The only shape that fully serves "my tickets with this status": Index Scan with no Sort, and its COUNT index-only. But it doesn't serve the plain list, so it would be a *second* index next to the kept one. **Rejected on growth:** with the kept index, a USER's status filter costs about her own ticket count, not the table's. At 500,000 tickets a median USER still filters about 19 rows. Revisit if one user with thousands of tickets filters by status often.
+- **`status`** (56 kB). **A real but modest win, rejected on cost, not because the win is imaginary.**
+  - The ADMIN lists didn't change at all: the planner kept walking the primary key, because a common status fills a page almost at once.
+  - `count … status=OPEN` (15%) improved by **30%** (0.96 → 0.67 ms), as a bitmap heap scan. Those 735 rows are spread across almost every heap page, so it still reads nearly the whole table.
+  - `count … status=CLOSED` (45%) kept its **seq scan**: the planner's own verdict that, for a value matching nearly half the table, reading the table straight through beats jumping between index and heap.
+  - That's a constant-factor improvement on one COUNT, and the count stays **linear** either way. 15% of 500,000 is 75,000 rows to count, whatever is indexed. It's paid for with a write on every insert and every status change, which is the most common update a ticket gets.
+- **`assignee_id`.** **Rejected today, and recorded as a prediction.**
+  - **No plan uses it.** The joins probe `app_user.id`, which is already the primary key. Nothing looks tickets up *by* assignee.
+  - **Its one use** is the foreign-key check when a user row is deleted (0.47 → 0.18 ms). There's no delete-user endpoint.
+  - **The prediction:** the first time an AGENT can ask for "my assigned tickets", which is `where assignee_id = ? order by id`, **`(assignee_id, id)` is the exact analogue of the kept index**, for the same reason: it serves the condition and the ORDER BY, so there's no Sort, no Filter, and an index-only COUNT. Add it with that filter, not before.
+
+### 58. What stays linear whatever is indexed: search and the unfiltered total. Both are contract decisions
+
+**The conclusion of the index work.** Two queries stay linear in the table, whatever is indexed. Both are linear because of a **promise in the contract**, not a missing index. So the next real performance decisions are contract decisions, not schema ones.
+
+**1. Search: a seq scan, because the contract says "contains".**
+- **Measured** at 7.4 to 8.9 ms on 5,000 tickets: a seq scan applying `lower()` and `LIKE` to every title and every ~200-character description. That's about 1.6 µs a row.
+- **Why no index helps:** the contract defines search as **substring** ("contains this text"), and that's where the leading `%` comes from. A btree can only serve a known prefix.
+- **If search meant prefix,** a btree on `lower(title)` with `text_pattern_ops` (or a C collation) would serve `LIKE 'abc%'`.
+- **For substring,** the only index is a trigram GIN index (`pg_trgm`), with its own costs: a larger index, slower writes on every title and description change, and an extension to install.
+- **Decision deferred, not built.** It becomes urgent at about **25,000 tickets**, where one search reaches about 40 ms. At 500,000 it would be about 800 ms a request. The choice then is prefix search (a contract change) or a trigram index (a schema change with a write cost). It should be made deliberately, before that size.
+
+**2. An ADMIN's unfiltered `totalItems`: it counts every row, because the answer depends on every row.**
+- **Measured** at 0.59 ms on 5,000 tickets. That's already the best plan a count can have: an Index Only Scan of the primary key, `Heap Fetches: 0`, all 5,000 entries. No index makes it cheaper, because the number it returns *is* the size of the table.
+- **It runs** on every ADMIN or MANAGER list request whose first page is full, which is any real table, and on every later page.
+- **How it scales** (about 0.12 µs an entry): about 60 ms at 500,000 tickets, and about 600 ms at 5 million. It reaches the 40 ms mark at about **350,000 tickets**.
+- **The contract decision:** must `totalItems` (and `totalPages`) be **exact**? The alternatives are:
+  - an **estimate** above some size, from PostgreSQL's statistics (`pg_class.reltuples`): free, but approximate and only as fresh as the last ANALYZE
+  - a **cap**, for example "more than 10,000"
+  - **omitting** the total, and returning only whether a next page exists, which needs one extra row and no count at all
+
+  Each changes what the frontend can show: "page 3 of 412", or "page 3 of many". Today exact is right, at any size this project will see soon.
+
+**Filtered COUNTs are different.** A USER's count is served by the kept index and costs about her own ticket count. An ADMIN's count by status is linear by nature (decision 57), and the same contract question applies to it.
+
 ### Comments in `AppUser` that this week makes wrong
 
 Two comments in `AppUser.java` say things arrive in **Week 8**: the password hash, and the `409 CONFLICT` for registering a taken email. Both arrive tomorrow, in Week 7, so both comments become wrong. They're fixed as part of Tuesday's work, not separately.
