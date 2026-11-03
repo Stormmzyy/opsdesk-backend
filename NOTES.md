@@ -461,6 +461,82 @@ Login is deliberately silent about which emails exist. A wrong password and an u
 
 **Recorded, not fixed,** because the contract specifies the 409.
 
+### 33. Authorization checks run in a `HandlerInterceptor`, before the body is read
+
+**The problem.** Decision 22's check order puts three checks ahead of both 400s: step 2 (the role 403), step 3 (404) and step 4 (the ticket-rule 403). None of them needs the body. The id is in the URL, the caller is in the token, and the creator, assignee and status are on the ticket's row. They do need Spring to have chosen the handler, because that's when the path variables exist. So they have to run in the window **after the handler is chosen and before the body is bound**.
+
+**The decision.** `TicketEditAccessInterceptor.preHandle` runs those checks for `PATCH /tickets/{id}` and for both methods of `/tickets/{id}/assignee`. It decides nothing itself: it calls the same `TicketService` rules the service runs again after binding, so the rules live in one place. A malformed body gets the same 404 or 403 as a well-formed one, with no special case.
+
+**Rejected:**
+- **`@PreAuthorize` alone.** It wraps the method call, and Spring reads and `@Valid`s the `@RequestBody` to build the method's arguments before it can call the method. So it runs *after* the body. This was measured, not assumed: with only `@PreAuthorize` on the assign endpoint, a USER sending a broken body got **400**, not 403. `@PreAuthorize` stays on the gated endpoints as the declaration at the door, and as a backstop if the interceptor's path patterns ever stop matching.
+- **The security filter chain.** It runs before Spring has chosen the handler, so it has no path variables. Doing the 404 lookup there would mean repeating Spring's routing.
+- **The exception handler,** which was Tuesday's way to put the 404 before the 400 (decision 6). It worked only by looking the ticket up again in the error path, and putting authorization there would have meant a second copy of every rule. All of it now lives in the interceptor, and GlobalExceptionHandler only translates exceptions.
+
+**The cost** is that a PATCH loads the ticket twice, once in the interceptor and once in the service. The interceptor's path patterns also have to cover every path that reaches those handlers. `/api/v1/tickets/*` doesn't match `/tickets/{id}/assignee`, because `*` is one path segment, which is why the second pattern exists.
+
+### 34. A USER's field restriction means "present and different", not "present at all"
+
+**The decision.** On her own OPEN ticket, a USER may change only `title` and `description` (decision 27). A request is refused only if `status`, `priority` or `team` would actually **change**: present in the body **and different** from the current value. Sending a field with the value it already has is not an attempt to change it.
+
+**Rejected: "present at all",** refusing any request that contains those fields. **The real frontend would break.** Its Edit page sends the whole form on every save, including priority, team and status (`EditTicketPage.tsx`, `{ id, ...values }`). Under "present at all", every edit Fatima made through the real UI would get a 403, even one that changed only the title. The rule exists to stop her *moving* her ticket out of OPEN, and a no-op can't move it.
+
+**What it costs.** Whether a request is accepted depends on the ticket's current state, not only on the request. That can't be used to escape the rule: once the ticket isn't OPEN, the ticket-level rule refuses her edits anyway.
+
+### 35. The 404 quotes the id exactly as it appeared in the URL, so a hidden ticket and a missing one are byte-identical
+
+**The decision.** Both refusals are built in one place, `TicketService.getVisibleTicket`, from the raw text of the id in the URL: "no ticket has this id" and "a ticket has this id, but you may not see it" (decision 23). `/tickets/02` answers `No ticket with id "02".` whether ticket 2 is missing or merely hidden. Fetching Kwame's ticket as Fatima and fetching ticket 999 give responses that differ only in the id each echoes, headers included.
+
+**Rejected: building the hidden one's message from the loaded ticket's id.** For `/tickets/02` that would say `"2"`, while a genuinely missing `/tickets/0999` says `"0999"`. The difference would show the id resolved to a real ticket, which is the leak decision 23 exists to prevent.
+
+**One behaviour changed.** Before this, a missing ticket whose id had leading zeros was reported with the parsed number (`/tickets/0999` said `"999"`). It now quotes the URL's text, which is what the contract says to do. Text that isn't an id at all (`/tickets/abc`) already quoted the URL, and still does.
+
+### 36. Unassigning is `DELETE /tickets/{id}/assignee`, not `{"assigneeId": null}`
+
+**The decision.** `PATCH /tickets/{id}/assignee` with `{"assigneeId": n}` assigns, and `assigneeId` is required. `DELETE /tickets/{id}/assignee` unassigns. Both use the same role gate, and both are no-ops when the end state already holds.
+
+**Rejected: `null` meaning "unassign".** Decision 11 records that in this API's PATCH bodies, `null` and "not sent" can't be told apart. If `null` unassigned, then `{}` would either unassign too (a forgotten field silently taking a ticket away from whoever was working on it), or this endpoint would have to read `null` differently from every other PATCH. A DELETE of the assignee says "remove the assignee", with nothing to misread.
+
+### 37. The assign validation messages reveal which user ids exist and each one's role. Safe only while assigning is ADMIN and MANAGER
+
+**The decision.** An assignee id that matches no user answers `No user with id 99.`, and a USER as assignee answers `A USER can't be assigned tickets.` Both are 400 `VALIDATION_ERROR` on `assigneeId`, not 404s: the URL's resource, the ticket, exists, and what's wrong is a value in the body.
+
+**What they reveal.** Together, the two messages let a caller find out which user ids exist and which of them are USERs. **That's safe only because assigning is limited to ADMIN and MANAGER,** who can already list every user with `GET /users`.
+
+**If assigning is ever opened to AGENT,** these messages become a user-enumeration oracle for a role that can't list users. They would then have to become one message that says neither. A comment at the messages says so.
+
+**Rejected: one generic message now.** It would protect nobody today, because the only callers can see the whole user list, and it would make a real mistake harder for an ADMIN or MANAGER to diagnose.
+
+### 38. "A USER may not change status" is a gate on the request, not a guarantee about the stored row
+
+**The problem.** The permission table's USER field rule is enforced on every request: no request from a USER that changes status, priority or team is accepted. But `updateTicket` isn't transactional. The ticket it loads is detached by the time `save()` runs, and `save()` on a detached entity is a JPA `merge`, which copies **every field of the copy read at the start** onto the row. Measured: a title-only edit produced `update ticket set assignee_id=?, created_by_id=?, description=?, priority=?, project_id=?, status=?, team=?, title=? where id=?`.
+
+So if Kwame moves #4 to IN_PROGRESS between Fatima's read and her save, her title edit writes OPEN back, and neither of them gets an error. This is decision 16's lost update, reaching a permission rule.
+
+**The decision.** Record the cell honestly: the rule is a **gate on the request, not a guarantee about the stored row**. The fix is Thursday's, in two parts:
+- **`@Version`** on `Ticket`, so a write based on a stale read gets a conflict instead of overwriting.
+- **`@DynamicUpdate` plus a transactional load-and-modify,** so a title-only edit writes only `title`.
+
+**Rejected half-fixes:**
+- **Narrowing the setters** so a USER's request only ever applies title and description. That doesn't close it: the merge writes every column regardless of which setters ran.
+- **`@DynamicUpdate` alone.** The detached merge copies the stale status onto the fresh row, so status still counts as changed and is still written. It only works together with the transactional load-and-modify, where "changed" means "changed by this request".
+- **Either of those without `@Version`.** They stop an unchanged column being overwritten, but not two people changing the *same* column. `@Version` catches that.
+
+### 39. Decided now for Thursday: `assigneeId` on the ticket shape is readable on output and refused on input
+
+**The problem.** Thursday adds `assigneeId` to the ticket shape, because today no response can show who a ticket is assigned to (decision 27's assign cells could only be proved from the row). The obvious way to add a field is to read and write it everywhere. **If `assigneeId` binds on `PATCH /tickets/{id}`, it bypasses the assign endpoint and its ADMIN-or-MANAGER gate.** An AGENT may edit a ticket assigned to them, so they could send `{"assigneeId": <own id>}` on any ticket they're allowed to edit, or move one of theirs to someone else. Nothing would refuse it, because the edit rules don't know the field means assigning.
+
+**The decision.** `assigneeId` appears in every ticket **response**. In a request to `PATCH /tickets/{id}` or `POST /tickets`, it is **refused** with 400 `VALIDATION_ERROR` on `assigneeId`, pointing to the assign endpoint. Assigning stays exclusively on `/tickets/{id}/assignee`, where the gate is.
+
+**Rejected:**
+- **Binding it on the ticket PATCH**, for the reason above.
+- **Silently ignoring it, as `createdBy` is.** A client has no legitimate way to set `createdBy`, so ignoring it hides nothing. A client sending `assigneeId` on the ticket PATCH is trying to assign, and there *is* a right way to do that. Ignoring it would answer 200 while not doing what was asked, and the client would find out later, if at all.
+
+**Thursday's tests for it:**
+- An AGENT sends `PATCH /tickets/{id}` with `{"assigneeId": <someone else's id>}` on a ticket assigned to them. They get **400**, and the row's `assignee_id` is unchanged.
+- The same AGENT sends `{"assigneeId": <their own id>}` on a ticket assigned to nobody. They get **403**: they can't edit that ticket at all, and the interceptor refuses before the body is read (decision 33). The row's `assignee_id` is still NULL.
+
+Together these cover both ways the field could be abused: handing off a ticket they hold, and claiming one they were never given.
+
 ### Comments in `AppUser` that this week makes wrong
 
 Two comments in `AppUser.java` say things arrive in **Week 8**: the password hash, and the `409 CONFLICT` for registering a taken email. Both arrive tomorrow, in Week 7, so both comments become wrong. They're fixed as part of Tuesday's work, not separately.
