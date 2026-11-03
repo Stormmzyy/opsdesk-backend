@@ -640,6 +640,135 @@ If the rule is reversed, the likely way to do it:
 
 Not done yet: it's part of the contract change.
 
+### 41. Ticket list queries can't be run without the caller's visibility
+
+**The danger.** Moving filters to composed Specifications is the most dangerous change of the week, because it fails silently. Suppose a Specification filters by status but forgets `created_by_id`. Then a USER's `?status=OPEN` returns everyone's open tickets, and the response looks perfectly normal.
+
+**The decision: make the unsafe version impossible to write, not merely avoided.**
+- **Nothing outside one class can run a ticket Specification.** `TicketRepository` extends the bare `Repository`, not `JpaRepository` or `JpaSpecificationExecutor`. It declares only single-row reads and writes (`findById`, `save`, `saveAll`, `delete`, `deleteById`, `count`), so `findAll()` and `findAll(spec)` don't exist. The unused `findByStatus` is gone too: it listed tickets with no caller.
+- **The only multi-ticket queries take the caller.** These are `findVisible(actor, filters, order[, pageable])` and `countVisible(actor, filters)`, on a Spring Data fragment. Its implementation, `TicketQueriesImpl`, holds the only Specification executor for tickets, in a private field.
+- **Visibility always comes first.** The one private method that builds the WHERE clause starts from `visibleTo(actor)` and ANDs the filters onto it. A new filter can only narrow what the caller sees.
+- **Nothing outside that class can even build a ticket Specification.** The factories are private there. Filters arrive as plain data (`TicketFilters`), and the order as a closed enum (`TicketOrder`).
+- **A test keeps it that way.** `TicketRepositoryShapeTest` fails if `TicketRepository` gains a method that returns many tickets without taking the caller, or that takes a `Specification` or a `Sort`. I proved it can fail: putting `JpaRepository` and `JpaSpecificationExecutor` back produced 17 named violations, including `findOne(Specification)` and the query-by-`Example` methods.
+
+**What it can't stop:** hand-written JPQL against the `EntityManager`. That's a deliberate act that shows in review, not a forgotten `.and()`.
+
+**Measured.** As Fatima, `?status=OPEN&size=1` gives `totalItems: 1`, and both queries carry her visibility condition first:
+- `select … from ticket t1_0 where t1_0.created_by_id=? and t1_0.status=? order by …`
+- `select count(t1_0.id) from ticket t1_0 where t1_0.created_by_id=? and t1_0.status=?`
+
+Her `?team=Operations` returns 0, though three Operations tickets exist. The permission walk passed 55 of 55 and 20 of 20 on a fresh database after the change.
+
+**What the walk doesn't cover.** It calls only plain `GET /tickets`, so it proves the visibility path for every role but not the filters or the sort. Those were proved by hand. Friday's tests should cover them, as a USER especially.
+
+(Spring Data skips the COUNT when a first page comes back less than full, because it already knows the total. A test that wants to see the count query has to fill the first page, for example with `size=1`.)
+
+### 42. Filters: status, priority and team, and the four edge cases
+
+`GET /tickets` takes `status`, `priority` and `team`, alongside `page`, `size`, `search` and `sort`. Any one of them switches the response to the envelope, as the four original parameters do.
+
+| Case | Answer | Why |
+| --- | --- | --- |
+| Unknown value: `status=BANANA`, `team=Marketing`, `status=open` | 400 `VALIDATION_ERROR` on the parameter, with the same message and exact spelling as the field in a body. `team` takes its label (`Operations`). | A dropped bad value would quietly become "no filter" and return more than asked. One vocabulary for bodies and filters means clients never translate. |
+| Sent twice: `status=OPEN&status=CLOSED` | 400: "Status can only be sent once." | Spring joins repeated values with commas. `search=printer&search=laptop` silently searched for `printer,laptop`: a 200 with the wrong answer. First or last would be arbitrary, and OR would be a feature the contract doesn't have. Refusing keeps OR addable. |
+| Empty: `status=`, `priority=`, `team=`, `page=`, `size=`, `sort=` | 400 | `""` isn't an allowed value. Treating it as "not sent" would give everything to a client that blanked it by mistake. |
+| Empty `search=` | Every visible ticket, as the envelope | Every text contains `""`. This is the contract's own definition, not a special case. |
+| Unknown parameter | 400, see decision 44 | |
+
+A repeated parameter's message wins over its other messages: the check is put first among the binder's validators. Every failing parameter is listed, in field order.
+
+### 43. Search covers title and description: a closed list, and wildcards are literal
+
+**The closed list.** `search` matches `title` or `description`, ignoring case, and nothing else. Both appear in every response the caller gets for those tickets, and search only runs inside her visible rows.
+
+The reason it's closed is the same as the sort whitelist. A search over a field the caller can't read is an **oracle**: the row count reveals whether a value exists without the value ever appearing in a response. Any field added later must already be in the response for the same tickets.
+
+**Wildcards are literal.** `%`, `_` and the escape character `\` are escaped, and the query uses `like ? escape '\'`. Measured as Priya:
+- `?search=%` returned 0 rows before any ticket contained a `%`.
+- With a ticket titled `Apply the 15% discount to plan_b (C:\billing)`, `%`, `15%`, `n_b`, `\` and `C:\b` each find only that ticket.
+- `nxb` and `C:b` find nothing, so `_` is not "any one character" and `\` is not skipped.
+
+### 44. Unknown query parameters are refused where an endpoint takes parameters. Unknown body fields stay ignored
+
+**The general rule.** An endpoint that accepts query parameters rejects unknown ones with a 400 `VALIDATION_ERROR`, keyed by the unknown name: `"There is no query parameter called \"stauts\"."`. An endpoint that accepts none ignores everything.
+
+Today only `GET /tickets` takes parameters, so the behaviour is the same as "only `GET /tickets`". The general form means no amendment when `GET /users` gains a filter.
+
+**Why split it from the body rule.** The two cases differ in severity:
+- **An ignored body field is a write that silently didn't happen.** The client can detect that by reading the resource back.
+- **An ignored query parameter is a read that silently returned a superset.** `?stauts=OPEN` returned every visible ticket, which looks exactly like a correct answer. No client can detect it.
+- **On an endpoint with no parameters,** an unknown one can't change the answer, so there's nothing to misread. Rejecting it there would cost compatibility for nothing.
+
+**What it breaks.** Anything that appends a cache-busting or tracking parameter (`?_=1712345`, `utm_*`) to `GET /tickets` now gets a 400. Nothing does today: neither the frontend, which calls `/tickets` bare, nor the walk script. A client that needs cache-busting should use `Cache-Control`. A reserved prefix can be let through later; relaxing a 400 breaks nobody.
+
+**Rejected:**
+- **Keep ignoring everywhere** (the contract until now). The superset is undetectable.
+- **Reject unknown fields everywhere, bodies included.** That turns a detectable, low-severity case into a contract break for writes, in the same change. It remains open for the contract rewrite (decision 40).
+
+**Goes in the contract.** It replaces "Any other query parameter is ignored" in `GET /tickets`.
+
+### 45. Sorting: a closed list of five fields, never a property path
+
+**The parameter.** `sort=<field>` or `sort=<field>,asc|desc`, where the field is one of `id`, `title`, `status`, `priority` or `team`. Anything else is a 400 `VALIDATION_ERROR`: "Sort must be id, title, status, priority or team, optionally followed by ,asc or ,desc."
+
+**Why a whitelist, and why it's structural.** Spring Data's `Sort` takes a property path and follows associations, so `sort=createdBy.passwordHash` would either error or order rows by a value the caller can't read. That second case is an oracle: the order of the rows leaks the hidden value one comparison at a time.
+- **The client's text never reaches the query.** It's matched against fifteen exact spellings and becomes a `TicketOrder.Field` enum, which `TicketQueriesImpl` maps to a fixed expression.
+- **No ticket query takes a Spring `Sort`.** `TicketQueries` has no such parameter, any `Sort` inside a page request is dropped, and the shape test forbids one.
+
+**Why reject rather than ignore.** An ignored sort answers in an order the client didn't ask for. Any order looks plausible, so a client paging "by priority" would never notice it isn't.
+
+**The decisions:**
+- **Default:** `id` ascending, the contract's existing order, so existing clients see no change.
+- **One field only.** `id` ascending is always appended as the tiebreaker, so equal keys come back in the same order and page boundaries are stable (decision 7). A second `sort` is a 400 under "sent once". Multi-field sorting is a feature nobody needs yet, and refusing keeps it addable.
+- **Direction:** exactly `asc` or `desc`. `DESC`, `up`, a trailing comma and a third part are all 400s.
+- **Meaningful orders, not stored text:**
+  - `priority` sorts by rank (LOW < MEDIUM < HIGH < URGENT).
+  - `status` sorts by workflow order (OPEN < IN_PROGRESS < RESOLVED < CLOSED). Both are CASE expressions. Alphabetical would give HIGH, LOW, MEDIUM, URGENT and put CLOSED first: wrong, while looking plausible.
+  - `title` sorts by `lower(title)`.
+  - `team` sorts by its stored name, which is in the same order as its labels.
+
+Measured against the seed data: every order matches, and `status=OPEN&sort=priority,desc&size=2&page=2` returns `[2, 4]` of 4. The COUNT behind a page carries no ORDER BY.
+
+### 46. Sorting by expressions uses no index. Accepted at this data size
+
+**The problem.** Three of the five sortable fields sort by expressions: `lower(title)`, and the two CASEs for `status` and `priority`. A plain btree index on the column can't serve an ORDER BY on an expression, so PostgreSQL sorts those rows itself.
+
+**What gets sorted is every matching row, not the page.** To return page 3 by priority, the database ranks all the rows that pass the WHERE clause, then skips and takes. With a LIMIT it uses a top-N heapsort, so the cost grows with the size of the filtered set, not with the page size. At this size (12 rows, and for an internal desk plausibly thousands), that's an in-memory sort of well under a millisecond.
+
+**The decision: accept the in-memory sort, and add no indexes for it.**
+
+**Rejected:**
+- **Expression indexes,** for example `create index on ticket ((lower(title)))` and the same two CASEs. They only work if the index expression matches the query's *exactly*.
+  - For the CASEs that can't happen as the code stands. Hibernate sends them with bound parameters (`case when t1_0.priority=? then ? …`, as logged), and an index expression is written with literals. The query would have to be changed to inline them first.
+  - Even then, the CASE in `TicketQueriesImpl` and the one in a migration would have to stay in step by hand. A new priority added to one but not the other silently stops the index being used.
+  - They also cost a write on every insert and update, for a sort nobody has measured as slow. `lower(title)` alone would work, but on its own it isn't worth an index either.
+- **Persisted rank columns** (`priority_rank`, `status_rank`, kept in sync with the enum). That means a schema change, denormalised data that must be updated on every write, and a migration for every existing row. It's the right shape for a big table, and the wrong one for twelve rows.
+
+**Revisit when** `EXPLAIN ANALYZE` on a real list query shows a sort over many thousands of rows on a hot path, or when the index work starts. Then pick between the two above with numbers. `id` and `team` already sort by plain columns, so they can use ordinary btree indexes whenever those exist.
+
+### 47. Offset pagination is a snapshot per request, not a cursor
+
+**The behaviour.** Each page is its own query: page 2 is "skip `size` rows, take `size`" *at the moment page 2 is asked for*. If the set or the order changes between a client's page 1 and page 2 requests, rows shift across the boundary. For example, a ticket is created, deleted, or moves to another status. Then a row can appear on both pages, or on neither.
+
+**Making `status` sortable makes this likelier.** Under `sort=status`, a status change doesn't just add or remove a row, it *moves* it within the order. A ticket moving from OPEN to IN_PROGRESS while someone pages through `?sort=status` can jump from page 2 to page 1 between their two requests, and they never see it. The same happens with `priority`, and with filters on either.
+
+**The decision.** Accept it, and say it in the contract. It's how offset pagination works everywhere, the frontend still pages a dozen tickets in the browser rather than through the API, and the `id` tiebreaker already rules out the *other* failure: rows trading places between two identical requests. The fix, if it's ever needed, is keyset pagination: "after this `(sort key, id)`" instead of "skip N". That's a contract change of its own, with a cursor in the envelope.
+
+**Goes in the contract.** The pagination section says pages are computed per request, and that changes between requests can make a ticket appear twice or not at all.
+
+### 48. No single casing rule for fixed values. The contract shows an example of each
+
+**The situation.**
+- Enumerated values on the wire are `OPEN`, `IN_PROGRESS`, `LOW`, `URGENT`: uppercase.
+- Team labels are `Engineering`, `HR`: as written.
+- The sort field and direction are `priority,desc`: lowercase.
+
+All are matched exactly, so `status=open` and `sort=priority,DESC` are both 400s. There is no one rule like "values are uppercase" or "matching ignores case" that describes all three. Stating one would be wrong for at least one of them.
+
+**The decision.** The contract states no casing rule. It shows a correct example of each kind next to its parameter, for example `?status=IN_PROGRESS`, `?team=Operations` and `?sort=priority,desc`, and says the values are matched exactly.
+
+**`DESC` will be the first thing someone tries.** Spring Data's own `Sort` parameter accepts `DESC` and `desc` alike, and so do most APIs built on it. Someone used to that will send `sort=priority,DESC` and get a 400. The example has to show the lowercase form, and the 400's message already does. Accepting both was considered and left out for consistency with every other fixed value here, which is exact. Relaxing it later would break nobody.
+
 ### Comments in `AppUser` that this week makes wrong
 
 Two comments in `AppUser.java` say things arrive in **Week 8**: the password hash, and the `409 CONFLICT` for registering a taken email. Both arrive tomorrow, in Week 7, so both comments become wrong. They're fixed as part of Tuesday's work, not separately.
