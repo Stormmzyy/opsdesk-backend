@@ -552,7 +552,7 @@ The assign path was already safe once `@Version` existed: merge compares the det
 - one transaction's commit being visible to another that's already open
 - the schema properties it sets
 
-An in-memory H2 may lock, isolate or create schemas differently. This hasn't been tried. If it won't run on H2, keep it on PostgreSQL (or Testcontainers) rather than weaken it until it passes.
+An in-memory H2 may lock, isolate or create schemas differently. This hasn't been tried. If it won't run on H2, keep it on PostgreSQL (or Testcontainers) rather than weaken it until it passes. (Tried in decision 62: it ports unchanged apart from the schema trick, and still fails on H2 with the fix removed.)
 
 ### 39. Decided now for Thursday: `assigneeId` on the ticket shape is readable on output and refused on input
 
@@ -1035,7 +1035,11 @@ The profile lives in `src/test`, so it never reaches the built jar. It's switche
 
 A suite that's green on H2 can hide a query that breaks on PostgreSQL, and the reverse.
 
-**Testcontainers was the better answer on correctness, and lost.** It would start a real PostgreSQL 16 in Docker for the tests: the same engine, the same dialect, the same SQL as production, and none of the differences above. It loses because it needs Docker running wherever the tests run, and starting a database container makes every run much slower. The point of today was a suite that passes on a machine with nothing else running.
+**Testcontainers was the better answer on correctness, and lost on startup time.** It would start a real PostgreSQL 16 in Docker for the tests: the same engine, the same dialect, the same SQL as production, and none of the differences above. As first written, the case against it had two parts: it needs Docker running, and starting a database container makes every run much slower.
+
+**Corrected (Part 6): the Docker argument doesn't hold.** The dev PostgreSQL already runs in Docker, so a machine that can run this project at all has Docker. Part 5 showed the real dependency: Docker Desktop had stopped, and the walk couldn't run until it was restarted. The H2 suite passed regardless. The honest remaining cost is startup time: a container start on every test run, against an in-memory database that's ready at once.
+
+**So Testcontainers stays a live option** for the PostgreSQL-specific surface that the walk currently guards on its own: `lower()` and collation, LIKE escaping on the real engine, the CASE sorts, the paging and COUNT SQL. Those could move into a small Testcontainers-backed test class, run alongside the H2 suite, if the walk's manual step ever proves too easy to skip.
 
 **The consequence, plainly.** After today, the H2 suite proves the **logic**. `scripts/week7-permission-walk.sh` is the **only** thing that exercises real PostgreSQL. So the walk is part of the definition of done, not a convenience: **a change isn't done until `./mvnw test` is green and the walk passes against the app running on `opsdesk-db`.**
 
@@ -1058,6 +1062,179 @@ Every expected order is written out by hand from decision 27's rows, not compute
   - The check is still Hibernate's: it adds `and version = ?` to the UPDATE and treats 0 rows changed as a conflict. H2's default isolation, READ COMMITTED, is the same as PostgreSQL's, so A's UPDATE sees what B committed.
 - **The real configuration is untouched.** The app started on the `default` profile and connected with `org.postgresql.jdbc.PgConnection`. The walk then passed: **55 of 55 requests, 20 of 20 checks.** With the new section it passes **70 of 70 requests and 37 of 37 checks.**
 - **With `TestProfileShapeTest` the suite is 15 tests,** all passing with PostgreSQL stopped.
+
+### 63. Three permission tests aimed where the shape tests are blind: methods that take the caller and could ignore her
+
+**The blind spot.** The two ticket shape tests prove that every method returning tickets *takes* an `AppUser`. Neither can prove the method *uses* her. A method that accepts the caller and ignores her passes both. `TicketPermissionTest` has three Mockito tests on `TicketService`, chosen for where ignoring the caller would do the most damage while looking the most normal.
+
+**What ruled one candidate out.** `canEdit`'s USER rule has two parts: "a ticket she created", and "while it's OPEN". The first part can't be reached over HTTP. `getVisibleTicket` runs before `canEdit` everywhere: in `updateTicket` and in `TicketEditAccessInterceptor`. So a ticket she didn't create is already a 404 before `canEdit` is asked. A test on it would pin a rule that nothing reaches today.
+
+**The three:**
+1. **The view rule's 404, on a write path.** `getVisibleTicket`'s own 404 is already pinned by `TicketServiceTest`; what wasn't pinned is that `updateTicket` goes through it.
+   - If `updateTicket` looked the ticket up with `findById` directly (the shape of the `getTicket(Long)` decision 61 deleted), it would still take the caller and pass the shape test. The request would still be refused, because `canEdit`'s USER rule throws.
+   - But it would be refused with a 403, which tells a USER that the ticket exists and is someone else's (decision 23). Everything still says no, only with the wrong answer, so only a test that asserts the exact refusal can see it.
+   - The test asserts the 404's exact message, an unchanged ticket, and no save.
+2. **`canEdit`'s AGENT rule: a ticket assigned to another agent.** The assignee comparison is the only thing between one agent and another's work. If it ignored the caller ("any assigned ticket will do"), nothing normally seen would change, because agents edit their own tickets and those stay allowed. The test checks the refusal's logged reason, so it's this rule refusing and not the "assigned to nobody" one. It also checks the allowed case, so a rule that refused every AGENT can't pass either.
+3. **The USER's field rule, the part of her edit rule HTTP can reach.**
+   - On her own OPEN ticket she may change the title and description and nothing else. The check decides by the caller's role. If it ignored her, she could move the ticket out of OPEN and lock herself out (decision 27), or raise its priority, and every such request would answer 200.
+   - The test refuses a status change (nothing changed, no save). It then allows a whole-form save, a new title with priority, status and team unchanged, because the real frontend sends the whole form every time.
+
+**Strict stubs, kept strict.** `MockitoExtension` fails a test whose stub is never used. In a permission test, half the tempting stubs are for the path that must *not* run.
+- **Only what the path must read is stubbed:** `findById`. If that stub goes unused, the method never reached the lookup, and the failure is right.
+- **What must not happen is verified, not stubbed:** `verify(ticketRepository, never()).save(any())`.
+- **Where the edit is allowed, `save` stays unstubbed** and returns null. The test reads the ticket object the service changed.
+- **No shared stubs in `@BeforeEach`, no `lenient()`, no strictness setting.**
+
+**Each one was proved against its own mutation of `TicketService`,** applied one at a time and then restored. Each mutation turned exactly its own test red and no other, with no unnecessary-stubbing errors:
+
+| Mutation | What failed |
+| --- | --- |
+| `updateTicket` looks the ticket up with `findById` | Test 1: "expected `TicketNotFoundException` but was `AccessDeniedException`" |
+| The AGENT rule skips the assignee comparison | Test 2: nothing thrown for another agent's ticket |
+| The field rule skips the role check | Test 3: nothing thrown for the status change |
+
+**What these do and don't show.** With the first mutation applied, the full suite ran 18 tests and only this one failed, so nothing before it caught that break. The walk wouldn't catch it either: on `PATCH /tickets/{id}` the interceptor calls `getVisibleTicket` before the controller, so over HTTP the 404 still comes from there. That's the interceptor covering for the service. The test pins the rule on the service itself, for any future caller that doesn't come through that interceptor.
+
+**What the first mutation revealed: the service's view check is held by one test and nothing else.** Over HTTP, the interceptor looks the ticket up through `getVisibleTicket` before the controller runs. So `updateTicket`'s own call to it looks redundant: remove it, and every response stays the same. The walk can't catch that, because the interceptor masks it, and before this test no other test could either. Someone tidying up would be right that it changes nothing today. They'd also be removing the only check between the service and a 403 that leaks the ticket's existence the day something calls `updateTicket` without that interceptor. This test's job is to stop that removal.
+
+**Why `canAssign` didn't need one of the three.** Three things enforce the assign rule independently:
+- `@PreAuthorize("hasAnyRole('ADMIN', 'MANAGER')")` on both assignee endpoints
+- the interceptor's `canAssign(actor, null)`, which runs before the lookup
+- `canAssign` again inside `assignTicket`
+
+A unit test on the service's copy would guard one layer of three. The three tests above each guard a rule with **one** layer: the view check on the write path, the AGENT comparison and the USER's field rule live nowhere else.
+
+**Measured in decision 65, and partly corrected there.** As first written, this paragraph said "break any one of them and the other two still refuse", from reading the code:
+- **Removing only the service's call held.** Everything stayed green, with two layers still standing.
+- **The interceptor and the service are not independent.** The interceptor's gate calls the same `canAssign`, so emptying that method takes out two layers at once.
+- **The interceptor's gate is the only layer that puts the role 403 ahead of the lookup's 404** (decision 22). `@PreAuthorize` runs later, when the controller method is called. With the gate gone, every real assign by an AGENT or USER is still refused, but the order breaks.
+
+So the layering protects *whether* an assign is refused, not *the order* in which the refusals come.
+
+### 64. The endpoint tests: full context with MockMvc, every endpoint that returns a ticket, and a page smaller than the data
+
+**Full context for all three, no slice.** `TicketEndpointsTest` is `@SpringBootTest` with `@AutoConfigureMockMvc` and `@ActiveProfiles("test")`. A `@WebMvcTest` slice would be testing a different application:
+- **It wouldn't run the checks that decide the status.** It registers neither `TicketEditAccessInterceptor`'s wiring nor method security unless both are imported by hand. Without them, the 403s and 404s that come before the body is read turn into 200s and 400s, so the slice reports green on requests the real app refuses.
+- **It mocks `TicketService`, so nothing is ever loaded from a database.** A missing fetch only fails when mapping reads a lazy link outside the transaction (`open-in-view` is off, decision 53). A mock hands back plain objects, so the slice can't produce that 500, which is exactly the bug the second requirement below exists for.
+
+**The three tests:**
+1. **The list, in both shapes.** The plain array (no parameters) and the page (any parameter) run different queries, so both are called.
+   - The pages are smaller than what matches: Kwame's `size=5` (5 items, `totalItems` 12, `totalPages` 3) and Fatima's `size=1` (`totalItems` 2). A full first page makes Spring Data run the COUNT, the query that broke when a fetch reached it (decision 52) and that hid at the default size. Fatima's totals also show the COUNT carries her visibility.
+2. **One ticket read with its people, and the refusals in decision 22's order:**
+   - no token: 401
+   - a hidden ticket: the same 404 as a missing one, with the same message
+   - a hidden ticket with an invalid body: 404, not 400
+   - an AGENT on an unassigned ticket with an invalid body: 403, not 400
+   - the role gates before the lookup: a missing ticket is 403 for the wrong role and 404 for the right one, on both `DELETE /tickets/{id}` and `PATCH /tickets/{id}/assignee`
+3. **The four writes that return a ticket,** on a ticket the test creates and deletes: create, assign, edit while assigned, unassign. Nothing seeded is changed, because this test shares its context, and so its database, with `TicketOutputOnlyFieldsTest`.
+
+Between them they call **every endpoint that returns a ticket**, all seven responses. That's the condition that makes mapping in the controller safe (decision 51): the missing-fetch 500 is deterministic, so it reaches production only on an endpoint no test calls. Every response is checked for the people's names, because reading a name is what touches the lazy link. `createdByName` is always read; `assigneeName` is read on an assigned ticket.
+
+**Proved by taking the fetches away,** one at a time, then restoring:
+
+| Fetch removed | What failed |
+| --- | --- |
+| `@EntityGraph` on `findById` | The single-ticket read: expected 200, got 500. The write test, at the assign: 500. |
+| The list's two `root.fetch` calls | The list test, at the plain array: 500. |
+
+(Each test stops at its first failing request.)
+
+### 65. Breaking things on purpose: what catches each break, and what only just does
+
+**The method.** Each break was applied alone and run through both checks: `./mvnw test` on H2, and the walk against the app on `opsdesk-db`. It was then restored before the next one. The walk can't put things back when a break refuses its clean-up, so the ticket rows were snapshotted before each run and restored afterwards when they differed. They differed after (e) and (f3).
+
+The two shapes of rule are tested differently:
+- **One enforcement point:** break it and expect red.
+- **Several layers:** break one and expect green, which is defence in depth working, then break all of them and expect red.
+
+**Results. "First failed" is the first failing test in the suite, and the first failing request or check in the walk.**
+
+| Break | `./mvnw test` (21 tests) | The walk (70 requests) |
+| --- | --- | --- |
+| (a) the LIKE escape (`escapeLike` returns the text as is) | **Green.** No test sends a search. | Red: **[15] "Search for a literal %"**, ids 1 to 10 where only the probe was expected |
+| (b) the COUNT guard (the fetch also reaches the COUNT) | Red: `TicketEndpointsTest…CountsOnlyWhatTheCallerSees`, at the `size=5` page: 500. The plain array before it passed. | Red: **[18] "Filtered page 1, size smaller than the match"**, 500. Every earlier list request passed: none filled a page. |
+| (c) visibility in the list query | Red: the same list test, at Fatima's page: an item created by Priya Sharma | Red: **[06] "View own only: USER"**, ids 1 to 12 where 4 and 9 were expected |
+| (d) `@Version` on `Ticket` | Red: both `TicketLostUpdateTest` tests, "B's status change was overwritten" | **Green, once the schema matches the code.** See below. |
+| (e) the `ROLE_` prefix in `JwtAuthFilter` | Red: `TicketEndpointsTest`, the ADMIN's delete of a missing ticket (expected 404, got 403) and the MANAGER's assign (expected 200, got 403) | Red: **[17] "Delete the probe ticket"**, 403 |
+| (f1) the service's own `canAssign` call | Green | Green: the interceptor and `@PreAuthorize` still standing |
+| (f2) the body of `canAssign` (interceptor and service together) | Red: `TicketEndpointsTest…ContractsOrder`, a USER on a missing ticket's assignee: expected 403, got 404 | Red: **[66] "/tickets/999/assignee, gate refuses: USER"**, the only failure |
+| (f3) all three: `canAssign`'s body and both `@PreAuthorize` annotations | Red: the **same single assertion** as (f2), and nothing else | Red: **[41] "AGENT assigns (#1 to Marco)"**, 200. The AGENT really reassigned #1. |
+
+**Nothing survived every layer being broken in both checks.** But four results are thinner than they look, and they're the findings:
+
+1. **(a) The suite can't see the LIKE escape at all.** Only the walk's `%` search catches it. Escaping isn't specific to a database, so it's logic H2 could test, and today one walk check is all that guards it.
+2. **(d) The walk can't see the lost update, and its first red was an accident.** With `@Version` removed, the walk's creates failed with a 500, because the dev database's `version` column is `NOT NULL`. `ddl-auto: update` built it while the annotation was there, and without it Hibernate inserts null. With the column made nullable, as a schema built from the broken code would have it, the walk passed all 70 requests. The walk never sends two concurrent writes, so `TicketLostUpdateTest` is the one and only guard on decision 38.
+3. **(f3) With every assign check gone, the suite fails on one assertion, on a ticket that doesn't exist.**
+   - The AGENT really did reassign #1, but no test in the suite has an AGENT or USER try to assign an *existing* ticket. Its one red is the order check on a missing ticket's assignee.
+   - Remove or reword that line, and the suite is green with no assign authorization at all. Only the walk would know.
+4. **(f2) The order of the assign refusals rests on a single layer.** The interceptor's gate is the only thing that puts the role 403 ahead of the lookup's 404 (decision 63, corrected). Two checks guard it: that one assertion and walk row [66].
+
+**Also noted:** (e) fails *closed*, because every `hasRole` check refuses everyone, ADMIN included. That's the safe direction for a bug, and both checks see it at once.
+
+None of these were fixed while breaking things. They were recorded here, and for the pull request, as gaps to close:
+- a search test on H2 for (a)
+- an AGENT and a USER assigning an existing ticket, expecting 403, for (f3)
+
+**Both are now closed, each proved against its own break.**
+- **`TicketEndpointsTest.anAgentAndAUserCannotAssignOrUnassignARealTicket`.** Daniel tries to assign Kwame's #2 and to unassign his own #1; Fatima tries to assign her own #4. Each attempt is on a ticket the caller *can* see, so the view's 404 can't answer first. Each expects a 403, and each row is read back. With (f3) applied, it fails: Daniel's assign expected 403, got 200.
+- **`TicketEndpointsTest.aSearchForAPercentSignFindsOnlyTheTicketContainingOne`.** With (a) applied, it fails on the item count. It sends the search with `param()`, because MockMvc encodes the URL template, so a `%25` written there would arrive double-encoded.
+
+The walk's header now also says it assumes a schema freshly built from the entities, because of (d).
+
+### 66. The contract's captures: 23 pinned by tests, 14 left as captures, and the link both ways
+
+**Why.** Decision 60: a capture is true when taken and goes stale silently, while a test fails when the code drifts. `ApiContractTest` pins 23 of the contract's 37 captures, through 18 MockMvc tests on the test profile. (First 20 of 36 through 16 tests. Part 6 added two pins, and split the login 401 into two captures.) It compares each body with `JsonCompareMode.STRICT`: exact keys, exact values, nothing extra. The strictness is what makes a field that *appears* (a password hash on a user) fail as surely as one that disappears.
+
+**The rule for choosing.** Pin what a client depends on and what could drift without anyone noticing. Leave out what depends on the run, and what's already pinned elsewhere.
+
+**Pinned:**
+
+| Capture | Why |
+| --- | --- |
+| The 401 without a token | Every client branches on it to send people to the login page. |
+| The validation envelope (`error`, `message`, `fields`) | Every form reads `fields`. |
+| The fixed 403 body, from three different code paths: `@PreAuthorize` on delete, the USER's field rule in the service, the users endpoint | If one path built its own body, "one 403" would quietly become several. |
+| The role 403 before the lookup's 404 | Decision 22's order. |
+| `PUT /tickets/1` is a 404 naming the method and path, not a 405 | Framework-owned behaviour, the kind an upgrade changes. |
+| The ticket's eleven fields | Strict; the frontend's types are written against it. |
+| A hidden ticket is the same 404 as a missing one | Decision 23. |
+| `abc` gives a 404 quoting what was sent | The raw-id rule. |
+| The plain array with no parameters | The v1 shape, and Fatima's two tickets only. |
+| The page envelope's five keys | With a filter, a CASE sort and page 2 in one request. |
+| Three query-string problems in one envelope | Three different checks merging into one response. |
+| `BAD_REQUEST` for a body that isn't an object | Its own error code. |
+| Create refuses `assigneeId` | Untested until now: only PATCH's refusal was tested. |
+| "A USER can't be assigned tickets." | No other guard anywhere, not even the walk. |
+| The user shape, strict | What keeps a password hash out of every response. |
+| A wrong password and an unknown email get the same 401 | Two captures, re-captured in Part 6 with a seeded user (Fatima, wrong password) and `nobody@example.com`, so they're reproducible on a fresh seed. The first capture used Ama's account, which only exists after the register examples run. |
+| Login's 200, by shape | The first call every client makes. The token differs every run, so it's checked as a non-empty string and replaced with a placeholder. The rest is compared strictly: exactly `token` and `user`, and the user exactly the shape `/auth/me` pins (one shared constant). It's Kwame's login, not the example's Ama. |
+| The project, strict | Read-only, with no permission logic, was an argument about permissions, not about shape. Nothing else would notice the project shape drifting. |
+
+**Left as captures, and why:**
+
+| Capture | Why it isn't pinned |
+| --- | --- |
+| Create 201, register 201 | The ids depend on what ran before. The shapes are pinned by the ticket and user pins. |
+| Edit 200, assign 200, unassign 200 | The `version` values depend on the order of edits. The shape is pinned; the names are checked in `TicketEndpointsTest`. |
+| Fatima reading her own ticket | Same shape as the pinned ticket; the allowed case is covered by the plain-array pin. |
+| `PATCH /tickets/999`'s 404 | Built by the same code as the pinned missing-ticket 404. |
+| A `"hello"` body | Same handler and body as the pinned `BAD_REQUEST`. |
+| PATCH status plus `assigneeId` | The assignee message is pinned by `TicketOutputOnlyFieldsTest`; the enum message comes from the same validator as create's team. |
+| Register 400, login 400 | The envelope is pinned; the messages are form copy. |
+| Register's two 409s | Form copy. `CONFLICT` is pinned by `GlobalExceptionHandlerTest`, and pinning them means writing users into the shared test database. |
+| Project 404 | Built the same way as the pinned ticket 404, from its own message. The project shape itself is now pinned. |
+
+**Both directions.**
+- **Backend:** each test in `ApiContractTest` names the contract section and the capture it pins.
+- **Frontend:** each pinned capture in `API_CONTRACT.md` has a "Pinned by:" line naming the test. The contract's intro now says an example without one is a capture only.
+- **The 409:** it was pinned in one direction only, so it got both. Its "Pinned by:" line names `GlobalExceptionHandlerTest`, and that test now names its section.
+
+Someone editing either side finds the other.
+
+**Proved to bite.**
+- Changing the fixed 403 message in `ApiError` failed both tests that pin it.
+- Leaving `version` out of the expected ticket made STRICT report the extra field in the response.
+- All 16 passed against today's code, so on the day the tests were written, the contract's captures were still true.
 
 ### Comments in `AppUser` that this week makes wrong
 
