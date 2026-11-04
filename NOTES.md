@@ -1236,6 +1236,19 @@ Someone editing either side finds the other.
 - Leaving `version` out of the expected ticket made STRICT report the extra field in the response.
 - All 16 passed against today's code, so on the day the tests were written, the contract's captures were still true.
 
+### 67. v1 was changed in place this week, not bumped to v2. Acceptable once, and only while every consumer is in this project
+
+**What the contract's own rule says.** A change that would break a client needs a new version, `/api/v2`, served alongside v1 until clients have moved (API_CONTRACT.md, "Base URL and versioning"). Week 7 didn't do that. It changed v1 in place.
+
+**What changed in a breaking way:**
+- **Unknown query parameters on `GET /tickets` went from ignored to 400** (decision 44). A client that sent a misspelt or stale parameter, say `?stauts=OPEN`, used to get the full list; it now gets `400 VALIDATION_ERROR` naming the parameter.
+- **The five output-only fields went from ignored to 400 on create and edit** (decisions 39, 40 and 49). These are `assigneeId`, `assigneeName`, `createdById`, `createdByName` and `version`. A client that echoed a ticket it had read straight back in a `POST` or `PATCH` used to succeed, because unknown body fields are ignored; it now gets a 400 for each of those fields, even sent as `null`.
+- **`phone`, `address` and `company` (its only field, `name`) are deprecated** (decision 15). Not breaking yet: they're still returned, always as empty strings. But they're on the path to breaking, because removing a field a client reads is a breaking change, and the contract already says they go in the next version.
+
+**Why it was acceptable here.** There is no external consumer. The only client is the frontend in this same project, owned by the same people, and its contract lives in its repo. A breaking change and the client's adjustment ship together, and the contract records the new behaviour the same week. Serving `/api/v2` alongside v1 would have cost two versions of every changed endpoint, to protect a client that moves in step anyway.
+
+**The condition for never doing it again.** Changing v1 in place is only safe while every consumer is in the room. **The first time anything outside this project consumes the API** (another team's service, a mobile app, a script someone else runs, a partner integration), **a breaking change needs `/api/v2` and a deprecation period**: v1 keeps working unchanged, v2 is served alongside it, and v1 is removed only after its consumers have moved. That includes removing the deprecated user fields: in place while the frontend is the only reader, in v2 once it isn't.
+
 ### Comments in `AppUser` that this week makes wrong
 
 Two comments in `AppUser.java` say things arrive in **Week 8**: the password hash, and the `409 CONFLICT` for registering a taken email. Both arrive tomorrow, in Week 7, so both comments become wrong. They're fixed as part of Tuesday's work, not separately.
