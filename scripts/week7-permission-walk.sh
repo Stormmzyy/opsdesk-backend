@@ -8,20 +8,30 @@
 #     bash scripts/week7-permission-walk.sh
 # Needs bash, curl, and docker (it reads rows with psql inside opsdesk-db).
 #
+# It assumes a schema freshly built from the entities. ddl-auto: update adds
+# columns but never drops or loosens one, so a column left over from older
+# code can make the walk fail for a reason unrelated to the change under
+# test: with @Version removed, the walk went red only because the stale
+# "version" column was still NOT NULL, while the real loss (lost updates)
+# went unseen (NOTES.md, decision 65). After changing an entity, rebuild the
+# database (README.md: docker rm -f opsdesk-db, then the docker run command)
+# before trusting a red here.
+#
 # Each request states the status code decision 27 expects and prints PASS or
 # FAIL; the script exits non-zero if anything failed. Friday's tests are meant
 # to turn these same requests and expectations into automated tests.
 #
 # It restores everything it changes, following decision 27's three rules:
 #   - the ADMIN delete is proved on a ticket the walk creates, never a seeded one
+#     (and the search and sort probe ticket is deleted as soon as it's used)
 #   - edits change the title, never #4's status, so #4 stays OPEN
 #   - assigning #2 runs after the AGENT edit checks, and #2 is put back to
 #     unassigned afterwards
 # Every changed title is put back, and every ticket it creates is deleted.
 #
 # One thing it can't put back: the ticket id sequence. Ids are never reused
-# (decision 1), so each run consumes four ids, and the tickets it creates are
-# #13 to #16 only on a freshly created database. The script reads every
+# (decision 1), so each run consumes five ids, and the tickets it creates are
+# #13 to #17 only on a freshly created database. The script reads every
 # created id from the response instead of assuming it, and Friday's tests
 # must do the same.
 #
@@ -59,6 +69,8 @@ check() { # check "label" "actual" "expected": for facts read from the database
 }
 ids() { echo "$BODY" | grep -oE '"id":[0-9]+,"title"' | grep -oE '[0-9]+' | tr '\n' ' ' | sed 's/ $//'; }
 assignee_of() { sql "select coalesce(assignee_id::text,'NULL') from ticket where id=$1"; }
+created_id() { echo "$BODY" | sed -n 's/^{"id":\([0-9]*\).*/\1/p'; }
+creator_of() { sql "select created_by_id from ticket where id=$1"; }
 
 echo "################ JSON type strictness: every body field is type-checked, nothing is coerced"
 r "title sent as a number"    400 "$PRIYA" POST /tickets '{"title":5,"description":"x","priority":"LOW","team":"HR"}'
@@ -72,6 +84,68 @@ r "View own only: USER" 200 "$FATIMA" GET /tickets; check "ids" "$(ids)" "4 9"
 r "USER, someone else's ticket (decision 23: 404, not 403)" 404 "$FATIMA" GET /tickets/2; HIDDEN=$BODY
 r "USER, a ticket that doesn't exist"                       404 "$FATIMA" GET /tickets/999; MISSING=$BODY
 check "the two 404 bodies, ids masked" "$(echo "$HIDDEN" | sed 's/[0-9]\+/N/g')" "$(echo "$MISSING" | sed 's/[0-9]\+/N/g')"
+
+echo; echo "################ FILTER, SORT, SEARCH AND PAGING ON REAL POSTGRESQL (NOTES.md, decision 62)"
+# The tests run on H2, which can't vouch for the SQL PostgreSQL gets: lower()
+# and its collation, LIKE escaping, the CASE expressions behind the sorts, and
+# the limit, offset and COUNT queries. These requests run that SQL here.
+# Every expected order is written out from decision 27's rows, not computed
+# by a query, so a wrong ORDER BY can't be copied into the expectation.
+# Run before the edits, while every title is the seeded one.
+totals() { echo "$BODY" | sed -n 's/.*"totalItems":\([0-9]*\),"totalPages":\([0-9]*\).*/\1 \2/p'; }
+field() { echo "$BODY" | sed -n 's/.*"fields":{"\([^"]*\)".*/\1/p'; }
+
+# Search: lower() on both sides, inside the visibility condition. "holiday"
+# is in #4's title and #8's description. Fatima sees only #4 and #9, so she
+# gets #4: #8 is cut by visibility, #9 by the search.
+r "Search, USER: visibility and lower() together" 200 "$FATIMA" GET "/tickets?search=HOLIDAY"; check "ids" "$(ids)" "4"
+r "  the same search, ADMIN"                       200 "$PRIYA"  GET "/tickets?search=HOLIDAY"; check "ids" "$(ids)" "4 8"
+
+# The sorts that are CASE expressions. size=20 so all twelve come back.
+# Ascending status would be useless here: the seed is already in workflow
+# order, so it equals the id order, and a sort that was ignored would pass.
+r "Sort by priority (rank, not alphabetical)" 200 "$KWAME" GET "/tickets?sort=priority&size=20"
+check "ids" "$(ids)" "4 6 12 2 8 9 11 3 5 10 1 7"
+r "Sort by priority, descending (ties stay by id ascending)" 200 "$KWAME" GET "/tickets?sort=priority,desc&size=20"
+check "ids" "$(ids)" "1 7 3 5 10 2 8 9 11 4 6 12"
+r "Sort by status, descending (workflow order, reversed)" 200 "$KWAME" GET "/tickets?sort=status,desc&size=20"
+check "ids" "$(ids)" "11 12 8 9 10 5 6 7 1 2 3 4"
+
+# A probe ticket, deleted at the end of this section. Its title has a
+# literal % (no seeded title or description has % or _), and starts with a
+# lower-case letter.
+r "Create the probe ticket" 201 "$PRIYA" POST /tickets '{"title":"a 100% walk probe","description":"x","priority":"LOW","team":"HR"}'; T_PROBE=$(created_id)
+
+# LIKE escaping: search for "%" alone. Escaped, it matches only a literal
+# percent sign: the probe. Unescaped, the pattern would be %%% and match all.
+r "Search for a literal %" 200 "$PRIYA" GET "/tickets?search=%25"
+check "ids" "$(ids)" "$T_PROBE"; check "totalItems totalPages" "$(totals)" "1 1"
+
+# The lower() sort. Seeded titles all start with a capital, so the probe is
+# what makes case matter: a case-sensitive byte order would put it last.
+# This database's collation (en_US.utf8) also ignores case at first, so this
+# proves the order ignores case on PostgreSQL, not which of the two did it.
+r "Sort by title (case-insensitive)" 200 "$PRIYA" GET "/tickets?sort=title&size=20"
+check "ids" "$(ids)" "$T_PROBE 6 11 3 5 1 7 2 12 8 10 9 4"
+
+r "Delete the probe ticket" 204 "$PRIYA" DELETE "/tickets/$T_PROBE"
+
+# Paging a filtered list. MEDIUM matches 4 tickets (#2 #8 #9 #11). With
+# size=3 the first page is full, so Spring Data must run the COUNT query to
+# know the total (with fewer rows than size it can skip it): totalItems 4
+# can't be read off three items.
+r "Filtered page 1, size smaller than the match" 200 "$KWAME" GET "/tickets?priority=MEDIUM&size=3"
+check "ids" "$(ids)" "2 8 9"; check "totalItems totalPages" "$(totals)" "4 2"
+r "Filtered page 2, the offset"                  200 "$KWAME" GET "/tickets?priority=MEDIUM&size=3&page=2"
+check "ids" "$(ids)" "11"; check "totalItems totalPages" "$(totals)" "4 2"
+r "Page past the last: empty, totals still right" 200 "$KWAME" GET "/tickets?priority=MEDIUM&size=3&page=3"
+check "ids" "$(ids)" ""; check "totalItems totalPages" "$(totals)" "4 2"
+
+# Three 400s, each checked for the field it names, so a 400 for some other
+# reason doesn't pass.
+r "Sort by a field off the list (a property path)" 400 "$KWAME" GET "/tickets?sort=createdBy.passwordHash"; check "field" "$(field)" "sort"
+r "An unknown query parameter"                     400 "$KWAME" GET "/tickets?colour=red";                  check "field" "$(field)" "colour"
+r "A status that doesn't exist"                    400 "$KWAME" GET "/tickets?status=BANANA";               check "field" "$(field)" "status"
 
 echo; echo "################ EDIT (titles changed, then restored)"
 r "ADMIN edits any (#3)"                  200 "$PRIYA"  PATCH /tickets/3 '{"title":"Walk: Priya edited #3"}'
@@ -110,8 +184,6 @@ r "  put #2 back"                 200 "$KWAME"  DELETE /tickets/2/assignee
 check "#2 assignee (row)" "$(assignee_of 2)" "NULL"
 
 echo; echo "################ CREATE (createdBy is checked in the database)"
-created_id() { echo "$BODY" | sed -n 's/^{"id":\([0-9]*\).*/\1/p'; }
-creator_of() { sql "select created_by_id from ticket where id=$1"; }
 r "Create: ADMIN"   201 "$PRIYA"  POST /tickets '{"title":"Walk ticket by Priya","description":"x","priority":"LOW","team":"HR"}';  T_PRIYA=$(created_id)
 check "#$T_PRIYA created_by_id (row)" "$(creator_of "$T_PRIYA")" "1"
 r "Create: MANAGER" 201 "$KWAME"  POST /tickets '{"title":"Walk ticket by Kwame","description":"x","priority":"LOW","team":"HR"}';  T_KWAME=$(created_id)

@@ -15,6 +15,10 @@ import com.opsdesk.backend.ticket.Ticket;
 // proves the exception is thrown; this pins what the client sees when it is:
 // the contract's error shape, with a fixed message that says nothing about
 // versions, entities or ids.
+//
+// Pins API_CONTRACT.md (in opsdesk-frontend), "#### Send only the fields
+// being changed": the 409 example, the contract's one hand-written response,
+// whose "Pinned by:" line names this test. Change the two together.
 class GlobalExceptionHandlerTest {
 
     @Test

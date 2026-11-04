@@ -113,6 +113,8 @@ Every path starts with `/api/v1`, and every request and response is exactly as [
 
 Every endpoint except register and login needs a token: `Authorization: Bearer <token>`, from `POST /auth/login`. Without one, every request, to any path, answers `401 UNAUTHORIZED`. Who may do what is in [Permissions](#permissions).
 
+**New in Week 7:** `POST /auth/register`, `POST /auth/login`, `GET /auth/me`, and assigning and unassigning (`PATCH` and `DELETE /tickets/{id}/assignee`). The other endpoints existed in Week 6. This week they gained the token and the permission rules, and `GET /tickets` gained the `priority` and `team` filters and sorting, next to Week 6's paging, `status` and `search`.
+
 | Endpoint | Who | What it does |
 | --- | --- | --- |
 | `POST /auth/register` | anyone | Create an account. It's always a USER. |
@@ -165,10 +167,26 @@ Authentication answers "who are you?" by checking the caller's identity, while a
 
 On Windows Command Prompt or PowerShell, use `mvnw.cmd test`.
 
-| Test | Needs the database? |
+**41 tests, and none of them need PostgreSQL or Docker.** The ones that start the application run on the `test` profile, `src/test/resources/application-test.yml`: an in-memory H2 database, built from the entities and seeded at startup, and gone when the run ends. Every new Spring test needs `@ActiveProfiles("test")`, or it connects to `opsdesk-db` instead; `TestProfileShapeTest` fails the build if one doesn't have it.
+
+| Tests | What they cover |
 | --- | --- |
-| `OpsdeskBackendApplicationTests` (`contextLoads`) | **Yes.** It starts the whole application, including the database connection and the seeder. Start `opsdesk-db` first. |
-| `TicketServiceTest` | No. It tests `TicketService` on its own, with the repository replaced by a Mockito mock. |
+| `TicketRepositoryShapeTest`, `TicketServiceShapeTest`, `TestProfileShapeTest` | Shape: no ticket query or service method can skip the caller, and no Spring test can skip the test profile. They check signatures, not behaviour. |
+| `TicketServiceTest`, `TicketPermissionTest` | Mockito, no database: the single-ticket lookup, and the permission rules where a method takes the caller and could ignore her (NOTES.md, decision 63). |
+| `TicketEndpointsTest` | Full application through MockMvc: every endpoint that returns a ticket, a page smaller than the data (so the COUNT query runs), the 401, 403 and 404 order, an AGENT and a USER refused on real tickets, and the LIKE escape (decisions 64 and 65). |
+| `ApiContractTest` | The contract's captured responses that clients depend on, compared strictly (decision 66). Each one has a "Pinned by:" line in [API_CONTRACT.md](https://github.com/Stormmzyy/opsdesk-frontend/blob/main/API_CONTRACT.md). |
+| `TicketLostUpdateTest`, `GlobalExceptionHandlerTest` | The lost update and its 409 (decision 38). `TicketLostUpdateTest` is the only check on the lost update anywhere: the walk can't see it. |
+| `TicketOutputOnlyFieldsTest`, `OpsdeskBackendApplicationTests` | Output-only fields refused on edit, and the application starting at all. |
+
+H2 is not PostgreSQL, so the tests prove the logic, not the SQL against the real database ([NOTES.md](NOTES.md), decision 62). The one check against real PostgreSQL is the permission walk. It covers the permission table and the list's filters, sorts, search and paging. With `opsdesk-db` and the app running:
+
+```sh
+bash scripts/week7-permission-walk.sh
+```
+
+The walk assumes a schema freshly built from the entities. After changing an entity, rebuild the database (the `docker rm -f opsdesk-db` step above) before trusting a red from it.
+
+**A change is done when `./mvnw test` is green and the walk passes.** Each catches breaks the other can't (decision 65).
 
 ## Design notes
 
