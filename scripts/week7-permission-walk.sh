@@ -8,6 +8,15 @@
 #     bash scripts/week7-permission-walk.sh
 # Needs bash, curl, and docker (it reads rows with psql inside opsdesk-db).
 #
+# It assumes a schema freshly built from the entities. ddl-auto: update adds
+# columns but never drops or loosens one, so a column left over from older
+# code can make the walk fail for a reason unrelated to the change under
+# test: with @Version removed, the walk went red only because the stale
+# "version" column was still NOT NULL, while the real loss (lost updates)
+# went unseen (NOTES.md, decision 65). After changing an entity, rebuild the
+# database (README.md: docker rm -f opsdesk-db, then the docker run command)
+# before trusting a red here.
+#
 # Each request states the status code decision 27 expects and prints PASS or
 # FAIL; the script exits non-zero if anything failed. Friday's tests are meant
 # to turn these same requests and expectations into automated tests.
