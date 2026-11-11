@@ -112,6 +112,48 @@
 
 	<build>
 		<plugins>
+			<!--
+				Refuses to build on a JDK older than java.version, before anything is compiled.
+
+				Why it exists: with JAVA_HOME on JDK 17, a target/ left by an IDE that compiled with
+				JDK 21 looks up to date, so Maven skips compiling and never notices the mismatch. The
+				failure comes later, when the test JVM refuses to load the classes ("class file version
+				65.0 ... only recognizes up to 61.0"), which points at the tests, not at JAVA_HOME. This
+				turns that into one line at the start naming the JDK needed and the JDK running.
+
+				CI cannot catch this: it clones fresh, so target/ is empty, and a wrong JDK there fails
+				loudly at compile time. It only happens on a developer machine, so the build has to
+				check for itself.
+
+				Version managed by the Spring Boot parent. Same in Boot 3.
+			-->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-enforcer-plugin</artifactId>
+				<executions>
+					<execution>
+						<id>require-java</id>
+						<goals>
+							<goal>enforce</goal>
+						</goals>
+						<configuration>
+							<rules>
+								<requireJavaVersion>
+									<!-- [21,) is "21 or later", as the README says; the number comes from java.version above, so it lives in one place. -->
+									<version>[${java.version},)</version>
+									<!--
+										The message replaces the plugin's own, so it must name the running JDK itself.
+										${java.version} here is the project's 21: the property above hides the JVM
+										property of the same name. java.runtime.version and java.home aren't defined
+										by the project, so they still come from the JVM that's running Maven.
+									-->
+									<message>OpsDesk needs JDK ${java.version} or later, but this build is running on JDK ${java.runtime.version} (${java.home}). Point JAVA_HOME at a JDK ${java.version} or later and run it again.</message>
+								</requireJavaVersion>
+							</rules>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
