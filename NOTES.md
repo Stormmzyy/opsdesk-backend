@@ -1541,6 +1541,28 @@ The counterargument is that the repositories are public, so the map is already p
 
 **Rejected: Swagger behind a token in production.** The UI can't send a Bearer header with the request that loads its own page, so the page would be broken there. A Swagger page nobody can open is the same as not having one, at the cost of a filter exception.
 
+### 75. OpsDesk v1.0 is backend `v1.0.0`, frontend `v2.0.0` and system `v1.0.0`. The frontend's October `v1.0.0` stays where it is
+
+**Status: decided in Week 8, at release.** The guide says to tag all three repositories `v1.0.0`. The frontend already had a `v1.0.0`: published on 14 October, on `0c279a9`, as "The first release of the OpsDesk frontend", running on a mock API. Today's frontend `main` is 41 commits past it.
+
+**The decision.**
+- **The frontend is tagged `v2.0.0`** on today's `main`.
+- **The backend and system are tagged `v1.0.0`**, as planned. The backend's tags are now `v0.1.0`, `v0.2.0` and `v1.0.0`, and the system repository has none before this.
+- **All three tags carry the message "OpsDesk v1.0"**, which ties them to one product release.
+- **The system README's "Versions" section maps the release to the three tags.** Without it, someone checking the deliverable finds the frontend's October `v1.0.0`, and concludes this week's tag was done when it wasn't.
+
+**Why a major version, not a minor one.** Today's frontend is a breaking change from its `v1.0.0`:
+- a build fails without `VITE_API_URL`;
+- the app does nothing useful without a backend to sign in to.
+
+Under semantic versioning that's a new major version. `v1.1.0` would claim that anything that worked with `v1.0.0` still works, and it doesn't.
+
+**The repositories version independently.** Each tag describes its own repository's history, so the numbers don't have to match. The product release is the row in the README that names one tag from each.
+
+**Rejected: move `v1.0.0` to today's `main`** (delete the tag locally and on GitHub, then recreate it), so all three repositories say `v1.0.0`. It's tidier to read, and it loses:
+- **The same name would mean two different commits.** Git doesn't update a tag someone has already fetched, so anyone who fetched the October tag in the last four weeks keeps it. Their `v1.0.0` and GitHub's would be different commits under one name, with no warning on either side.
+- **A tag is a promise about one commit.** A published tag's whole value is that it never moves. Moving one to make three names match trades that promise for appearance.
+
 ### Comments in `AppUser` that this week makes wrong
 
 Two comments in `AppUser.java` say things arrive in **Week 8**: the password hash, and the `409 CONFLICT` for registering a taken email. Both arrive tomorrow, in Week 7, so both comments become wrong. They're fixed as part of Tuesday's work, not separately.
