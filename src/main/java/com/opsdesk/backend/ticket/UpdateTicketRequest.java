@@ -1,6 +1,7 @@
 package com.opsdesk.backend.ticket;
 
 import com.opsdesk.backend.validation.OneOf;
+import io.swagger.v3.oas.annotations.media.Schema;
 import com.opsdesk.backend.validation.Refused;
 import com.opsdesk.backend.validation.TextField;
 
@@ -22,23 +23,28 @@ public record UpdateTicketRequest(
                 requiredMessage = "Title is required.",
                 tooShortMessage = "Title must be at least 3 characters.",
                 notTextMessage = "Title must be text.")
+        @Schema(type = "string", minLength = 3)
         Object title,
 
         @TextField(required = false,
                 requiredMessage = "Description is required.",
                 notTextMessage = "Description must be text.")
+        @Schema(type = "string", minLength = 1)
         Object description,
 
         @OneOf(required = false, values = {"LOW", "MEDIUM", "HIGH", "URGENT"},
                 message = "Priority must be one of LOW, MEDIUM, HIGH or URGENT.")
+        @Schema(implementation = Priority.class)
         Object priority,
 
         @OneOf(required = false, values = {"OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"},
                 message = "Status must be one of OPEN, IN_PROGRESS, RESOLVED or CLOSED.")
+        @Schema(implementation = TicketStatus.class)
         Object status,
 
         @OneOf(required = false, values = {"Engineering", "Finance", "HR", "Operations", "Support"},
                 message = "Team must be one of Engineering, Finance, HR, Operations or Support.")
+        @Schema(implementation = Team.class)
         Object team,
 
         // The ticket shape's output-only fields (NOTES.md, decisions 39 and
@@ -50,18 +56,23 @@ public record UpdateTicketRequest(
         // and skip the ADMIN-or-MANAGER gate on the assign endpoint entirely:
         // the edit rules don't know the field means assigning.
         @Refused(message = "The assignee can't be changed here. Use PATCH /tickets/{id}/assignee.")
+        @Schema(hidden = true)
         JsonNode assigneeId,
 
         @Refused(message = "The assignee can't be changed here. Use PATCH /tickets/{id}/assignee.")
+        @Schema(hidden = true)
         JsonNode assigneeName,
 
         @Refused(message = "The creator is set by the server and can't be sent.")
+        @Schema(hidden = true)
         JsonNode createdById,
 
         @Refused(message = "The creator is set by the server and can't be sent.")
+        @Schema(hidden = true)
         JsonNode createdByName,
 
         @Refused(message = "The version is set by the server and can't be sent.")
+        @Schema(hidden = true)
         JsonNode version) {
 
     // Trimmed before validation; status, priority and team are not.

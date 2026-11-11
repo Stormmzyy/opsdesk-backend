@@ -1,6 +1,7 @@
 package com.opsdesk.backend.auth;
 
 import com.opsdesk.backend.validation.TextField;
+import io.swagger.v3.oas.annotations.media.Schema;
 
 // The body of POST /api/v1/auth/login. The contract only requires both
 // fields to be present: no email format check and no password length check.
@@ -12,12 +13,14 @@ public record LoginRequest(
         @TextField(required = true,
                 requiredMessage = "Email is required.",
                 notTextMessage = "Email is required.")
+        @Schema(type = "string", minLength = 1, requiredMode = Schema.RequiredMode.REQUIRED)
         Object email,
 
         // Never trimmed, for the reason given on RegisterRequest.password.
         @TextField(required = true,
                 requiredMessage = "Password is required.",
                 notTextMessage = "Password is required.")
+        @Schema(type = "string", format = "password", minLength = 1, requiredMode = Schema.RequiredMode.REQUIRED)
         Object password) {
 
     String emailText() {

@@ -1,6 +1,7 @@
 package com.opsdesk.backend.ticket;
 
 import java.util.ArrayList;
+import org.springdoc.core.annotations.ParameterObject;
 import java.util.List;
 import java.util.Map;
 
@@ -120,7 +121,7 @@ public class TicketController {
     // Both shapes contain only the tickets the caller may see: a USER's list
     // is her own tickets, and her page's totals count only those.
     @GetMapping
-    public Object listTickets(@Valid @ModelAttribute TicketListParams params,
+    public Object listTickets(@Valid @ParameterObject @ModelAttribute TicketListParams params,
                               @AuthenticationPrincipal AppUser actor) {
         if (!params.anySent()) {
             return ticketService.listTickets(actor).stream()

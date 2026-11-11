@@ -1,6 +1,7 @@
 package com.opsdesk.backend.auth;
 
 import com.opsdesk.backend.validation.PatternField;
+import io.swagger.v3.oas.annotations.media.Schema;
 import com.opsdesk.backend.validation.TextField;
 
 // The body of POST /api/v1/auth/register. Every message is copied exactly
@@ -19,6 +20,7 @@ public record RegisterRequest(
         @TextField(required = true,
                 requiredMessage = "Name is required.",
                 notTextMessage = "Name is required.")
+        @Schema(type = "string", minLength = 1, requiredMode = Schema.RequiredMode.REQUIRED)
         Object name,
 
         // Letters (A to Z, either case), digits, "_" and "." only, 3 to 30 of
@@ -29,6 +31,7 @@ public record RegisterRequest(
         // (NOTES.md, decision 30).
         @PatternField(regexp = "[A-Za-z0-9_.]{3,30}",
                 message = "Username must be 3 to 30 letters, numbers, dots or underscores.")
+        @Schema(type = "string", pattern = "[A-Za-z0-9_.]{3,30}", requiredMode = Schema.RequiredMode.REQUIRED)
         Object username,
 
         // Something, an @, something, a dot, something, with no spaces and no
@@ -38,6 +41,7 @@ public record RegisterRequest(
         // accept "ama@example", with no dot in the domain.
         @PatternField(regexp = "[^\\s@]+@[^\\s@]+\\.[^\\s@]+",
                 message = "Enter a valid email address.")
+        @Schema(type = "string", pattern = "[^\\s@]+@[^\\s@]+\\.[^\\s@]+", requiredMode = Schema.RequiredMode.REQUIRED)
         Object email,
 
         // At least 8 characters, counted like the title's minimum. Never
@@ -54,6 +58,8 @@ public record RegisterRequest(
                 tooShortMessage = "Password must be at least 8 characters.",
                 notTextMessage = "Password must be at least 8 characters.",
                 tooLongMessage = "Password must be at most 72 bytes.")
+        @Schema(type = "string", format = "password", minLength = 8, requiredMode = Schema.RequiredMode.REQUIRED,
+                description = "At most 72 bytes of UTF-8 (BCrypt's limit): fewer than 72 characters if any are outside ASCII.")
         Object password) {
 
     // Only the name is trimmed, before validation, because the contract says
