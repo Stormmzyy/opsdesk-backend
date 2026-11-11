@@ -1249,6 +1249,48 @@ Someone editing either side finds the other.
 
 **The condition for never doing it again.** Changing v1 in place is only safe while every consumer is in the room. **The first time anything outside this project consumes the API** (another team's service, a mobile app, a script someone else runs, a partner integration), **a breaking change needs `/api/v2` and a deprecation period**: v1 keeps working unchanged, v2 is served alongside it, and v1 is removed only after its consumers have moved. That includes removing the deprecated user fields: in place while the frontend is the only reader, in v2 once it isn't.
 
+### 68. `JWT_SECRET` has no default outside the `dev` profile. Without it, the app refuses to start
+
+**Status: decided in Week 8, implemented Tuesday.**
+
+**The finding.** `application.yml` reads `secret: ${JWT_SECRET:dev-only-secret-change-me-at-least-32-chars}`. If `JWT_SECRET` isn't set, the app starts normally and signs tokens with that default. The default has been in a public repository since Week 6. Anyone who reads it can sign a token with `"role":"ADMIN"` for any email, and the server accepts it, because a valid signature is the only thing it checks. A deployment that forgets one environment variable looks healthy and has no authentication.
+
+**The decision.**
+- `application.yml` keeps `${JWT_SECRET}` with no default.
+- The development value moves to `application-dev.yml`, which only applies under the `dev` profile.
+- `application-test.yml` gets its own value. Today it inherits the main file's default (its comment says "the JWT settings still come from there"), so without its own value the suite would stop starting too.
+- `JwtService` checks the secret before using it. If it's blank, startup fails with one sentence that names what's missing and how to fix it: "JWT_SECRET is not set. Set it to a random value of at least 32 characters, or run with the dev profile."
+
+Removing the default alone isn't enough. Spring's own failure reads "Could not resolve placeholder 'JWT_SECRET' in value "${app.jwt.secret}"", which you can work out but which doesn't say what to do. And `JWT_SECRET=` set to an empty string resolves without any error at all: it fails later inside `Keys.hmacShaKeyFor` with a `WeakKeyException` about key bits, which points at the wrong thing. This is the same principle as the enforcer plugin in the pom: fail at startup, with a sentence that names the cause, rather than later with an error about a symptom.
+
+**`dev` is switched on deliberately. It is never the default.** Running with no profile means production behaviour: no default secret and no seeder (decision 69). `spring.profiles.default: dev` would be more convenient locally, and it would bring back exactly the failure this decision removes: a production run that forgets to set a profile would quietly become a development run. The cost is that local runs name the profile (`./mvnw spring-boot:run -Dspring-boot.run.profiles=dev`). The README's run instructions and the walk's usage line change to say so.
+
+**Alternatives, and why they lose:**
+- **Keep the default and log a warning at startup.** Nobody reads startup warnings on a deploy that works, and "works" is the problem: every request succeeds, and the hole is invisible until someone uses it. A warning reports a mistake that has already shipped. A refusal stops it from shipping.
+- **Keep the default but refuse that one value in production.** That is a list with one entry. Any other committed or guessable value still passes, and the check needs to know which run is "production", which is the very thing a forgotten setting gets wrong. Having no default asks for none of that knowledge.
+- **Generate a random secret at startup when none is set.** It's secure, but every restart logs everyone out, and with two instances behind a load balancer, each one rejects the other's tokens. It turns a missing setting into confusing behaviour later, instead of a clear failure now.
+
+### 69. `SampleDataSeeder` runs only under the `dev` and `test` profiles. Required for Wednesday, not optional
+
+**Status: decided in Week 8, implemented Tuesday, before the compose work.**
+
+**The finding.** `SampleDataSeeder` is a plain `@Component` with no `@Profile`. It fills any empty table, so the first start against any new database, including a production one, creates the six decision-27 users with the password `devpassword123`, which is published in the README. One of them, Priya, is an ADMIN.
+
+**The decision.** `@Profile({"dev", "test"})` on `SampleDataSeeder`. `test` is on the list because the H2 suite is built on decision 27's rows: five test classes log in as the seeded users. With no profile, the seeder doesn't exist, and a new database starts with no users.
+
+**Why it's required for Wednesday.** The guide's step on Wednesday is to register a user and promote them to ADMIN with SQL. That step only makes sense if no admin exists yet. Under today's seeder, the compose backend would start with six accounts already in it, in a database meant to be production, and one of them would be an admin whose password anyone can read. Promoting a second admin by hand would secure nothing. So this goes in before the compose file, not after it.
+
+**What it costs, and what Wednesday has to plan for:**
+- **The walk needs the `dev` profile.** It logs in as the seeded users, so it can only run against a backend started with `dev`. For the walk to work under compose (Part 3a), the compose file should take the profile from the environment with no default, for example `SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-}`. A plain `docker compose up` is then production, and `SPRING_PROFILES_ACTIVE=dev docker compose up` is the walk's setup.
+- **The seeder fills each table only when it's empty** (its own comment explains why). If a compose database has already been used without `dev`, it has users, so starting it with `dev` later seeds the projects and tickets but not the users, and the walk can't log in. A dev run needs a fresh volume, just as decision 25 recreates the dev database.
+- **Known gap: after Wednesday, nothing automated checks the production stack.** `dev` is never the default (decision 68), and the walk needs the seeded matrix of users and tickets, so it can only run against a backend started with `dev`. The compose stack runs without `dev`, as production, so the walk never runs against it. The H2 suite doesn't touch it either. The only check on the production stack is Wednesday's manual sequence: register, log in, create a ticket, `docker compose down`, `docker compose up`, and confirm the ticket survived. That sequence exercises what production adds on top of `dev` (no seeder, a real `JWT_SECRET`, the volume outliving the containers), and it does so by hand, once, when someone remembers to. A change that breaks the production stack but not the `dev` one goes unnoticed until someone runs that sequence again. The fix is an automated smoke test of that sequence against the prod-profile stack, probably in Thursday's CI. Until then, this is recorded as a gap, not as covered.
+- **The `test` profile name now appears in main code.** If someone set `SPRING_PROFILES_ACTIVE=test` on the production jar, it would seed. Accepted: that is a deliberate act, not something that happens by forgetting a setting, and forgetting a setting is the failure this decision is about.
+
+**Alternatives, and why they lose:**
+- **Keep seeding, but with a random or environment-supplied password.** That still creates six accounts and twelve sample tickets in a production database that nobody asked for, and it still creates an admin, so Wednesday's SQL promotion is still pointless. The problem is the accounts existing, not just their password.
+- **A flag such as `app.seed.enabled`, defaulting to `true`.** That's the same mistake as decision 68's default: safe only when someone remembers to switch it off. Defaulting to `false` is just the profile again, with a second switch that has to be kept in step with it.
+- **Let it seed, then delete the seeded users by hand after the first start.** The accounts exist from the first start until someone remembers, and the step has to be repeated on every new database. A precaution that depends on someone remembering it, every time, isn't a reliable one.
+
 ### Comments in `AppUser` that this week makes wrong
 
 Two comments in `AppUser.java` say things arrive in **Week 8**: the password hash, and the `409 CONFLICT` for registering a taken email. Both arrive tomorrow, in Week 7, so both comments become wrong. They're fixed as part of Tuesday's work, not separately.
