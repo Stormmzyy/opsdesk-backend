@@ -1,6 +1,7 @@
 package com.opsdesk.backend.ticket;
 
 import java.math.BigInteger;
+import io.swagger.v3.oas.annotations.media.Schema;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Locale;
@@ -44,23 +45,28 @@ import com.opsdesk.backend.validation.WholeNumber;
 public record TicketListParams(
 
         @WholeNumber(min = 1, message = "Page must be a whole number, 1 or more.")
+        @Schema(type = "integer", minimum = "1", defaultValue = TicketListParams.DEFAULT_PAGE)
         String page,
 
         @WholeNumber(min = 1, max = 100, message = "Size must be a whole number from 1 to 100.")
+        @Schema(type = "integer", minimum = "1", maximum = "100", defaultValue = TicketListParams.DEFAULT_SIZE)
         String size,
 
         @OneOf(required = false, values = {"OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"},
                 message = "Status must be one of OPEN, IN_PROGRESS, RESOLVED or CLOSED.")
+        @Schema(implementation = TicketStatus.class)
         String status,
 
         // The same values and message as priority in a request body.
         @OneOf(required = false, values = {"LOW", "MEDIUM", "HIGH", "URGENT"},
                 message = "Priority must be one of LOW, MEDIUM, HIGH or URGENT.")
+        @Schema(implementation = Priority.class)
         String priority,
 
         // The labels, as in a request body and every response.
         @OneOf(required = false, values = {"Engineering", "Finance", "HR", "Operations", "Support"},
                 message = "Team must be one of Engineering, Finance, HR, Operations or Support.")
+        @Schema(implementation = Team.class)
         String team,
 
         // Any text is a valid search, so there's nothing to check.
@@ -84,9 +90,22 @@ public record TicketListParams(
                 "priority", "priority,asc", "priority,desc",
                 "team", "team,asc", "team,desc"},
                 message = "Sort must be id, title, status, priority or team, optionally followed by ,asc or ,desc.")
+        @Schema(defaultValue = TicketListParams.DEFAULT_SORT, allowableValues = {
+                "id", "id,asc", "id,desc",
+                "title", "title,asc", "title,desc",
+                "status", "status,asc", "status,desc",
+                "priority", "priority,asc", "priority,desc",
+                "team", "team,asc", "team,desc"})
         String sort) {
 
-    private static final int DEFAULT_SIZE = 10;
+    // The defaults when a page is asked for but a parameter isn't sent. Text,
+    // not numbers, so the @Schema annotations above can name these same
+    // constants (an annotation can only refer to a compile-time constant),
+    // and the defaults Swagger shows can't drift from the ones the code uses:
+    // there's one copy of each.
+    static final String DEFAULT_PAGE = "1";
+    static final String DEFAULT_SIZE = "10";
+    static final String DEFAULT_SORT = "id";
 
     // Each parameter's name and the word its messages start with. The keys
     // are the query string's names, in field order; TicketController uses them
@@ -116,10 +135,7 @@ public record TicketListParams(
     // The order, as data for TicketService. Only call after @Valid passed,
     // which guarantees the text is one of the fifteen spellings above.
     TicketOrder order() {
-        if (sort == null) {
-            return TicketOrder.DEFAULT;
-        }
-        String[] parts = sort.split(",");
+        String[] parts = (sort == null ? DEFAULT_SORT : sort).split(",");
         TicketOrder.Field field = TicketOrder.Field.valueOf(parts[0].toUpperCase(Locale.ROOT));
         boolean descending = parts.length == 2 && parts[1].equals("desc");
         return new TicketOrder(field, descending);
@@ -138,14 +154,11 @@ public record TicketListParams(
     // A page too big for a long is still a valid page number (just past the
     // last page), so it's capped rather than rejected.
     long pageNumber() {
-        if (page == null) {
-            return 1;
-        }
-        return new BigInteger(page).min(BigInteger.valueOf(Long.MAX_VALUE)).longValue();
+        return new BigInteger(page == null ? DEFAULT_PAGE : page).min(BigInteger.valueOf(Long.MAX_VALUE)).longValue();
     }
 
     int pageSize() {
-        return size == null ? DEFAULT_SIZE : Integer.parseInt(size);
+        return Integer.parseInt(size == null ? DEFAULT_SIZE : size);
     }
 
     // The contract: search ignores leading and trailing spaces.

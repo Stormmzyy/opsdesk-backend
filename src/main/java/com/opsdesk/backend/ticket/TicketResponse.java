@@ -2,6 +2,8 @@ package com.opsdesk.backend.ticket;
 
 import com.opsdesk.backend.user.AppUser;
 
+import io.swagger.v3.oas.annotations.media.Schema;
+
 // The shape of a ticket in every API response, in the contract's order.
 // Jackson writes a record's fields in the order they're declared, so id
 // comes first.
@@ -32,7 +34,12 @@ public record TicketResponse(
         Priority priority,
         TicketStatus status,
         Team team,
+        // null when nobody is assigned, and both together (the contract:
+        // "integer or null", "null exactly when assigneeId is"). Without
+        // these, Swagger described them as a plain integer and string.
+        @Schema(types = {"integer", "null"}, format = "int64")
         Long assigneeId,
+        @Schema(types = {"string", "null"})
         String assigneeName,
         Long createdById,
         String createdByName,

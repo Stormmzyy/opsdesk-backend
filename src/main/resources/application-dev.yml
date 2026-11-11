@@ -33,6 +33,15 @@ app:
     # The Vite dev server.
     allowed-origin: ${ALLOWED_ORIGIN:http://localhost:5173}
 
+# Swagger, development only (decision 74): the page at /swagger-ui.html and the
+# document at /v3/api-docs, open without a token (SecurityConfig permits them
+# only when this is on). application.yml keeps both off everywhere else.
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
 logging:
   level:
     # This application's DEBUG lines (decision 72), e.g. a request with an

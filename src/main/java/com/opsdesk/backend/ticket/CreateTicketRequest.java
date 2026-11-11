@@ -1,6 +1,7 @@
 package com.opsdesk.backend.ticket;
 
 import com.opsdesk.backend.validation.OneOf;
+import io.swagger.v3.oas.annotations.media.Schema;
 import com.opsdesk.backend.validation.Refused;
 import com.opsdesk.backend.validation.TextField;
 
@@ -32,35 +33,44 @@ public record CreateTicketRequest(
                 requiredMessage = "Title is required.",
                 tooShortMessage = "Title must be at least 3 characters.",
                 notTextMessage = "Title must be text.")
+        @Schema(type = "string", minLength = 3, requiredMode = Schema.RequiredMode.REQUIRED)
         Object title,
 
         @TextField(required = true,
                 requiredMessage = "Description is required.",
                 notTextMessage = "Description must be text.")
+        @Schema(type = "string", minLength = 1, requiredMode = Schema.RequiredMode.REQUIRED)
         Object description,
 
         @OneOf(required = true, values = {"LOW", "MEDIUM", "HIGH", "URGENT"},
                 message = "Priority must be one of LOW, MEDIUM, HIGH or URGENT.")
+        @Schema(implementation = Priority.class, requiredMode = Schema.RequiredMode.REQUIRED)
         Object priority,
 
         @OneOf(required = true, values = {"Engineering", "Finance", "HR", "Operations", "Support"},
                 message = "Team must be one of Engineering, Finance, HR, Operations or Support.")
+        @Schema(implementation = Team.class, requiredMode = Schema.RequiredMode.REQUIRED)
         Object team,
 
         // Output-only: refused, see the note above.
         @Refused(message = "The assignee can't be set here. Use PATCH /tickets/{id}/assignee.")
+        @Schema(hidden = true)
         JsonNode assigneeId,
 
         @Refused(message = "The assignee can't be set here. Use PATCH /tickets/{id}/assignee.")
+        @Schema(hidden = true)
         JsonNode assigneeName,
 
         @Refused(message = "The creator is set by the server and can't be sent.")
+        @Schema(hidden = true)
         JsonNode createdById,
 
         @Refused(message = "The creator is set by the server and can't be sent.")
+        @Schema(hidden = true)
         JsonNode createdByName,
 
         @Refused(message = "The version is set by the server and can't be sent.")
+        @Schema(hidden = true)
         JsonNode version) {
 
     // Trimming happens here, in the compact constructor, because the contract

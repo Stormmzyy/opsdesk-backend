@@ -18,12 +18,16 @@
 #         bash scripts/week7-permission-walk.sh
 #     WALK_DB_CONTAINER=other-name overrides the name (default opsdesk-db).
 #   - Under docker compose: name the service instead. Compose looks up the
-#     container itself, because its name (e.g. opsdesk-system-db-1) depends on
-#     the project, which is exactly what made a hardcoded name break.
-#         WALK_DB_SERVICE=db COMPOSE_FILE=../opsdesk-system/compose.yaml \
+#     container itself, because its name (opsdesk-db-1 under opsdesk-system's
+#     compose project, "opsdesk") depends on the project, which is exactly
+#     what made a hardcoded name break.
+#         WALK_DB_SERVICE=db COMPOSE_FILE=../opsdesk-system/docker-compose.yml \
 #             bash scripts/week7-permission-walk.sh
 #     COMPOSE_FILE is read by docker compose itself, not by this script; leave
 #     it out when running from the directory that holds the compose file.
+#     Only for a compose stack running the dev profile: opsdesk-system's own
+#     docker-compose.yml runs prod, which seeds no users (decision 69), so the
+#     walk can't sign in there.
 #
 # It assumes a schema freshly built from the entities. ddl-auto: update adds
 # columns but never drops or loosens one, so a column left over from older

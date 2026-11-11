@@ -1,8 +1,12 @@
 # OpsDesk backend
 
+[![Backend CI](https://github.com/Stormmzyy/opsdesk-backend/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Stormmzyy/opsdesk-backend/actions/workflows/ci.yml)
+
 The backend for OpsDesk, an internal operations desk where staff raise support tickets, move them through a workflow, and see what each team is working on.
 
 It is a Spring Boot REST API backed by PostgreSQL. It implements the API contract written in Week 4, which lives in the frontend repo: [opsdesk-frontend/API_CONTRACT.md](https://github.com/Stormmzyy/opsdesk-frontend/blob/main/API_CONTRACT.md). If this code and the contract disagree, the contract wins.
+
+> **To run all of OpsDesk** (the database, this API and the web app, together, with Docker), follow the [opsdesk-system README](https://github.com/Stormmzyy/opsdesk-system#readme). This README is for working on the backend on its own: running it against a local database with sample data, its settings, and its tests.
 
 ## Requirements
 
@@ -10,6 +14,14 @@ It is a Spring Boot REST API backed by PostgreSQL. It implements the API contrac
 - Docker
 
 Maven is not needed. The project includes the Maven wrapper (`mvnw` / `mvnw.cmd`).
+
+**The wrapper uses `JAVA_HOME` when it's set, before the `java` on your PATH.** If `./mvnw` stops at once with `OpsDesk needs JDK 21 or later, but this build is running on JDK 17…`, point `JAVA_HOME` at a JDK 21 for that terminal (the folder depends on your JDK):
+
+```sh
+export JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-21.0.4.7-hotspot"
+```
+
+PowerShell: `$env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-21.0.4.7-hotspot"`
 
 ## Built on Spring Boot 4
 
@@ -160,9 +172,32 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/tickets
 
 The same `curl http://localhost:8080/api/v1/tickets` without the header answers `401`, which also shows the app is up.
 
+### Swagger: the interactive API page (development only)
+
+With the app running under `dev`, open **<http://localhost:8080/swagger-ui.html>**. It's generated from the running code (springdoc), so its paths, parameters, request fields and response shapes are exactly what this server does; the rules it can't show (status codes, errors, permissions) are in [API_CONTRACT.md](https://github.com/Stormmzyy/opsdesk-frontend/blob/main/API_CONTRACT.md) ([NOTES.md](NOTES.md), decision 73). The raw document is at `/v3/api-docs`.
+
+To call an endpoint that needs a token:
+
+1. Open **POST /api/v1/auth/login**, choose **Try it out**, and send `{"email": "priya.sharma@opsdesk.com", "password": "devpassword123"}`.
+2. Copy the `token` from the response.
+3. Choose **Authorize** at the top of the page, paste the token (without "Bearer "), and choose **Authorize**. The padlocks close.
+4. Every operation you try now sends the token. Sign in as a USER (such as `fatima.bello@opsdesk.com`) instead, and `DELETE /tickets/{id}` answers `403`.
+
+**Only under `dev`.** In every other profile Swagger is switched off: `/swagger-ui.html` and `/v3/api-docs` answer `401` without a token and `404` with one, like any path that doesn't exist, because a public `/v3/api-docs` would hand anyone the map of every endpoint (decision 74). So it isn't on the Docker Compose stack, which runs the production profile.
+
 ### Using it with the frontend
 
-The frontend ([opsdesk-frontend](https://github.com/Stormmzyy/opsdesk-frontend)) runs on <http://localhost:5173> and calls this API from the browser. The backend allows browser requests from **that origin only** (CORS, configured in `CorsConfig`). If the frontend runs on any other port, the browser blocks every request with "blocked by CORS policy", so keep it on 5173. `curl` and Postman aren't affected, because only browsers enforce CORS.
+The frontend ([opsdesk-frontend](https://github.com/Stormmzyy/opsdesk-frontend)) calls this API from the browser, so the backend allows browser requests from **one origin**, its `ALLOWED_ORIGIN` setting (CORS, configured in `CorsConfig`). Under `dev` that's <http://localhost:5173>, where the frontend's dev server runs. If the frontend runs anywhere else, the browser blocks every request with "blocked by CORS policy": run it on 5173, or set `ALLOWED_ORIGIN` to its origin. `curl` and Postman aren't affected, because only browsers enforce CORS.
+
+### The Docker image
+
+The [Dockerfile](Dockerfile) builds the JAR on JDK 21 and runs it on a JRE alone, as a non-root user (no compiler and no source in the image). It's normally built and run by the [opsdesk-system](https://github.com/Stormmzyy/opsdesk-system#readme) compose file. To build it on its own:
+
+```sh
+docker build -t opsdesk-backend .
+```
+
+No setting is built in: the container takes them from the environment when it starts (see [Environment variables](#environment-variables)), and with none it stops with the report naming `DB_URL`. The image build skips the tests on purpose, because CI runs them on every push.
 
 ## Permissions
 
@@ -185,7 +220,7 @@ Authentication answers "who are you?" by checking the caller's identity, while a
 
 On Windows Command Prompt or PowerShell, use `mvnw.cmd test`.
 
-**41 tests, and none of them need PostgreSQL or Docker.** The ones that start the application run on the `test` profile, `src/test/resources/application-test.yml`: an in-memory H2 database, built from the entities and seeded at startup, and gone when the run ends. Every new Spring test needs `@ActiveProfiles("test")`, or it connects to `opsdesk-db` instead; `TestProfileShapeTest` fails the build if one doesn't have it.
+**52 tests, and none of them need PostgreSQL or Docker.** They also run in CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) on every push to `main` and every pull request, together with a build of the Docker image. The ones that start the application run on the `test` profile, `src/test/resources/application-test.yml`: an in-memory H2 database, built from the entities and seeded at startup, and gone when the run ends. Every new Spring test needs `@ActiveProfiles("test")`, or it connects to `opsdesk-db` instead; `TestProfileShapeTest` fails the build if one doesn't have it.
 
 | Tests | What they cover |
 | --- | --- |
@@ -195,6 +230,9 @@ On Windows Command Prompt or PowerShell, use `mvnw.cmd test`.
 | `ApiContractTest` | The contract's captured responses that clients depend on, compared strictly (decision 66). Each one has a "Pinned by:" line in [API_CONTRACT.md](https://github.com/Stormmzyy/opsdesk-frontend/blob/main/API_CONTRACT.md). |
 | `TicketLostUpdateTest`, `GlobalExceptionHandlerTest` | The lost update and its 409 (decision 38). `TicketLostUpdateTest` is the only check on the lost update anywhere: the walk can't see it. |
 | `TicketOutputOnlyFieldsTest`, `OpsdeskBackendApplicationTests` | Output-only fields refused on edit, and the application starting at all. |
+| `ProductionSettingsTest`, `EnvExampleTest` | The production profile refuses to start without each required setting, naming it (decision 68), and `.env.example` lists exactly those settings. |
+| `RefusedCredentialsNotLoggedTest` | A refused registration or login never writes the password or email to the log, even with Spring's web logging at DEBUG (decision 72). |
+| `SchemaMatchesValidationTest` | What Swagger says about each request field (`@Schema`) matches what validation enforces (decision 73). |
 
 H2 is not PostgreSQL, so the tests prove the logic, not the SQL against the real database ([NOTES.md](NOTES.md), decision 62). The one check against real PostgreSQL is the permission walk. It covers the permission table and the list's filters, sorts, search and paging. With `opsdesk-db` and the app running:
 
