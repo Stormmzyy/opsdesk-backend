@@ -15,7 +15,7 @@ import org.springframework.core.env.StandardEnvironment;
 
 import com.opsdesk.backend.OpsdeskBackendApplication;
 
-// The production profile refuses to start without each of its four required
+// The production profile refuses to start without each of its five required
 // settings, and names the one that's missing (decision 68).
 //
 // Every one of them has an EMPTY default in application.yml, so the checks
@@ -42,10 +42,11 @@ class ProductionSettingsTest {
             "DB_URL", "jdbc:h2:mem:production-settings-test;DB_CLOSE_DELAY=-1",
             "DB_USER", "sa",
             "DB_PASSWORD", "not-a-real-password",
-            "JWT_SECRET", "a-secret-only-for-production-settings-test");
+            "JWT_SECRET", "a-secret-only-for-production-settings-test",
+            "ALLOWED_ORIGIN", "http://localhost:3000");
 
     @ParameterizedTest(name = "a prod start without {0} fails and names {0}")
-    @ValueSource(strings = {"DB_URL", "DB_USER", "DB_PASSWORD", "JWT_SECRET"})
+    @ValueSource(strings = {"DB_URL", "DB_USER", "DB_PASSWORD", "JWT_SECRET", "ALLOWED_ORIGIN"})
     void aProdStartWithoutTheSettingFailsAndNamesIt(String missing) {
         Map<String, Object> settings = new HashMap<>(ALL_SETTINGS);
         settings.remove(missing);
@@ -69,6 +70,24 @@ class ProductionSettingsTest {
                 .isNotNull();
         assertThat(cause.getSetting()).isEqualTo(missing);
         assertThat(cause.getMessage()).startsWith(missing + " is not set.");
+    }
+
+    // An ALLOWED_ORIGIN that CORS would accept without complaint but that
+    // can't work, or works too well: a trailing slash never equals the Origin
+    // header a browser sends, so every browser request would fail as "blocked
+    // by CORS policy"; "*" would let any website call the API. Both stop the
+    // start with the value named.
+    @ParameterizedTest(name = "a prod start with ALLOWED_ORIGIN={0} fails and names it")
+    @ValueSource(strings = {"http://localhost:3000/", "*"})
+    void aProdStartWithAnOriginThatCantWorkFails(String origin) {
+        Map<String, Object> settings = new HashMap<>(ALL_SETTINGS);
+        settings.put("ALLOWED_ORIGIN", origin);
+
+        MissingSettingException cause = findMissingSetting(startProductionWith(settings));
+
+        assertThat(cause).as("ALLOWED_ORIGIN=%s should stop the start", origin).isNotNull();
+        assertThat(cause.getSetting()).isEqualTo("ALLOWED_ORIGIN");
+        assertThat(cause.getMessage()).contains("is not a single origin");
     }
 
     // Starts the application with the prod profile and ONLY these settings.

@@ -47,3 +47,7 @@ app:
     # be replayed against a dev server, and the other way round. At least 32
     # bytes, as JwtService requires.
     secret: test-only-secret-never-used-outside-the-test-suite
+  cors:
+    # Required like every other setting (RequiredSettingsCheck). The tests
+    # don't run in a browser, so any valid origin would do; this is the dev one.
+    allowed-origin: http://localhost:5173

@@ -57,6 +57,13 @@ public class SecurityConfig {
                         // "/api/v1/auth/**", so GET /auth/me, which needs a
                         // signed-in user, isn't opened by accident.
                         .requestMatchers(HttpMethod.POST, "/api/v1/auth/register", "/api/v1/auth/login").permitAll()
+                        // The health check, for a container or load balancer,
+                        // which call it without credentials (decision 74).
+                        // GET on this exact path only: not "/actuator/**", so
+                        // every other actuator path, real or not, still gets
+                        // decision 24's 401. It answers {"status":"UP"} or
+                        // "DOWN" and nothing else (application.yml).
+                        .requestMatchers(HttpMethod.GET, "/actuator/health").permitAll()
                         // Everything else needs a signed-in user, including
                         // paths that don't exist (decision 24): the caller
                         // gets the same 401 for every path, real or not.

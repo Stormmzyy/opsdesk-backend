@@ -1465,7 +1465,12 @@ Annotating every endpoint by hand would fix all three, and would also make a sec
 
 ### 74. Swagger's paths and `/actuator/health` are open without a token. A deliberate deviation from decision 24, and a dev-only Swagger
 
-**Status: decided in Week 8, for Tuesday. Neither springdoc nor Actuator is in the pom yet.**
+**Status: decided in Week 8. The Actuator half was implemented Tuesday; Swagger comes with springdoc on Thursday.** As built:
+- **`GET /actuator/health` answers `{"status":"UP"}`, and nothing else, without a token,** in both profiles (measured). Only `health` is exposed, with details and components `never`.
+- **Two Boot defaults were switched off,** because they say more than up or down. Health added Kubernetes probe groups by default (`{"groups":["liveness","readiness"],"status":"UP"}`), so `probes.enabled: false`. And `/actuator` served a discovery page linking every exposed endpoint to any signed-in user, so `discovery.enabled: false`.
+- **Decision 24 is no weaker than recorded above.** Before Actuator, every anonymous `/actuator/…` request answered 401. After it, every one still does except the exact `GET /actuator/health`, measured on `/actuator/anything-else`, `/actuator`, `/actuator/env`, `/actuator/health/db` and `/actuator/health/`. Signed in, a path that doesn't exist answers 404, as before. `/actuator/health/db` answers Actuator's own bodyless 404, not the contract's error body: it's outside `/api`, and accepted.
+- **A health check must call the exact path.** `/actuator/health/` (with a trailing slash) answers 401 without a token, because only the exact path is permitted.
+- **The allowed browser origin is configuration now** (`ALLOWED_ORIGIN`; `http://localhost:5173` under `dev`), checked at startup like the other settings. `RequiredSettingsCheck` also refuses `*`, and any value with a path or a trailing slash: `http://localhost:3000/` never equals the `Origin` header a browser sends, so it would fail silently as "blocked by CORS policy". The Week 6 `CorsFilter`, at the highest precedence ahead of Spring Security, is unchanged. Measured: under `dev` a preflight from 5173 gets 200 with `Access-Control-Allow-Origin` and one from 3000 gets 403 with none; under `prod` with `ALLOWED_ORIGIN=http://localhost:3000`, the reverse.
 
 **The permit list.** Exact, like decision 18's open endpoints. Nothing gets a wildcard it doesn't need.
 - `GET /actuator/health`: exactly that path, not `/actuator/**`. Every other Actuator path stays under `anyRequest().authenticated()`, so it answers decision 24's 401.

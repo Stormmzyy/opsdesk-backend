@@ -88,6 +88,41 @@ app:
     # How long a token from login stays valid. After that the client logs in
     # again; there is no refresh token.
     expiry-minutes: 60
+  cors:
+    # The one origin (scheme, host and port) whose pages may call the API from
+    # a browser. No usable default, like the settings above:
+    # RequiredSettingsCheck refuses a missing one, and "*" or a value with a
+    # path or trailing slash. Wednesday's compose passes http://localhost:3000.
+    allowed-origin: ${ALLOWED_ORIGIN:}
+
+# Actuator: health only (decision 74). It answers {"status":"UP"} or "DOWN"
+# and nothing else, on GET /actuator/health, which SecurityConfig lets through
+# without a token. No other endpoint is exposed over HTTP at all: env,
+# configprops, loggers and heapdump stay off (a heap dump would hold
+# JWT_SECRET and every token in memory).
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+      # No /actuator "discovery" page. It lists a link to every exposed
+      # endpoint, and a signed-in user could read it; health is the only
+      # endpoint, and its path is documented, so the list adds nothing.
+      discovery:
+        enabled: false
+  endpoint:
+    health:
+      # Boot adds Kubernetes-style probe groups by default, and health then
+      # answers {"groups":["liveness","readiness"],"status":"UP"}. That says
+      # more than up or down (decision 74), and nothing here deploys to
+      # Kubernetes. Switch on again if it ever does.
+      probes:
+        enabled: false
+      # Without these, health would also list each component (the database,
+      # disk space, ...) with its details: the database product and version,
+      # free disk bytes. Decision 74: up or down only.
+      show-details: never
+      show-components: never
 
 # Logging (decision 72). These are production's levels, as everything in this
 # file is: INFO for this application (refusals at WARN, normal events at INFO,

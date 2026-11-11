@@ -2,6 +2,7 @@ package com.opsdesk.backend.config;
 
 import java.util.List;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -10,8 +11,8 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import org.springframework.web.filter.CorsFilter;
 
-// Lets the frontend's dev server (http://localhost:5173) call this API from a
-// browser.
+// Lets the frontend call this API from a browser: the one origin named by
+// ALLOWED_ORIGIN (http://localhost:5173, the Vite dev server, under dev).
 //
 // Why this is a backend setting, not something the frontend can fix:
 //
@@ -73,16 +74,23 @@ import org.springframework.web.filter.CorsFilter;
 @Configuration
 public class CorsConfig {
 
-    // The Vite dev server's address. A deployed frontend would add its own
-    // origin here, ideally read from configuration rather than written in code.
-    private static final String FRONTEND_DEV_ORIGIN = "http://localhost:5173";
-
+    // The one origin allowed to call the API from a browser comes from
+    // configuration (app.cors.allowed-origin, set from ALLOWED_ORIGIN): the
+    // Vite dev server, http://localhost:5173, under the dev profile, and
+    // whatever the deployment serves the frontend from otherwise (Wednesday's
+    // compose: http://localhost:3000). It used to be written here as a
+    // constant. RequiredSettingsCheck refuses to start without it, and refuses
+    // "*" or a value with a path or trailing slash, which would never equal
+    // the Origin header a browser sends.
+    //
+    // Only WHERE the origin comes from changed. The filter, and the reasons
+    // above for using one, are as Week 6 left them.
     @Bean
-    public FilterRegistrationBean<CorsFilter> corsFilter() {
+    public FilterRegistrationBean<CorsFilter> corsFilter(@Value("${app.cors.allowed-origin}") String allowedOrigin) {
         CorsConfiguration config = new CorsConfiguration();
         // Exactly this origin, not "*". A wildcard would let any website's
         // scripts read the API from a visitor's browser.
-        config.setAllowedOrigins(List.of(FRONTEND_DEV_ORIGIN));
+        config.setAllowedOrigins(List.of(allowedOrigin));
         // The methods the contract uses. The filter answers OPTIONS (the
         // preflight) itself. PUT isn't listed because the API has no PUT
         // endpoints.
@@ -98,7 +106,7 @@ public class CorsConfig {
         // header, not cookies (NOTES.md, decision 19), so there is nothing for
         // the browser to send automatically. If cookies were ever used, it
         // would have to be added here, and it only works with a named origin
-        // like the one above, never with "*".
+        // like the configured one, never with "*".
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/api/**", config);

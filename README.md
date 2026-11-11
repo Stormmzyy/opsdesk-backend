@@ -95,6 +95,7 @@ Use the email in lowercase, because that's how emails are stored (see [NOTES.md]
 | `DB_USER` | Database username | `opsdesk` | **required** |
 | `DB_PASSWORD` | Database password | `opsdesk` | **required** |
 | `JWT_SECRET` | Signs every login token: a random value of at least 32 characters | a published development value | **required** |
+| `ALLOWED_ORIGIN` | The one origin a browser may call the API from, such as `http://localhost:3000` (no path, no trailing slash) | `http://localhost:5173` | **required** |
 
 **`dev` is never the default** (NOTES.md, decision 68). Without a profile the app applies production rules: every setting in the table is required, the sample data isn't loaded, and a missing setting stops it at startup with a report naming the variable and what to do, for example:
 

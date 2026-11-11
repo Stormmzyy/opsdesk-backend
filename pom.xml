@@ -50,6 +50,13 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-security</artifactId>
 		</dependency>
+		<!-- Only for GET /actuator/health (decision 74): up or down, for a container's
+		     health check. Every other endpoint is switched off in application.yml.
+		     Same name in Boot 3. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
 
 		<!-- JWT: the API is all the code compiles against; the implementation and its
 		     Jackson-based JSON support are only needed at runtime, as the jjwt README says. -->
