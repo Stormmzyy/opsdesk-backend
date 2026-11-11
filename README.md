@@ -15,6 +15,14 @@ It is a Spring Boot REST API backed by PostgreSQL. It implements the API contrac
 
 Maven is not needed. The project includes the Maven wrapper (`mvnw` / `mvnw.cmd`).
 
+**The wrapper uses `JAVA_HOME` when it's set, before the `java` on your PATH.** If `./mvnw` stops at once with `OpsDesk needs JDK 21 or later, but this build is running on JDK 17…`, point `JAVA_HOME` at a JDK 21 for that terminal (the folder depends on your JDK):
+
+```sh
+export JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-21.0.4.7-hotspot"
+```
+
+PowerShell: `$env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-21.0.4.7-hotspot"`
+
 ## Built on Spring Boot 4
 
 This project uses Spring Boot 4.1.2. Most tutorials and Stack Overflow answers are still written for Spring Boot 3, and some names changed between the two. For example, `spring-boot-starter-web` is now `spring-boot-starter-webmvc`. Where the code uses something that was named differently in Boot 3, a comment next to it gives the Boot 3 name.
