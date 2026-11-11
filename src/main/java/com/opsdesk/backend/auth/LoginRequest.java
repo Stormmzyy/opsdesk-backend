@@ -27,4 +27,14 @@ public record LoginRequest(
     String passwordText() {
         return (String) password;
     }
+
+    // A record's generated toString() prints every field, so this one would
+    // print the password and the email. Nothing logs a request today, but a
+    // single log.debug("{}", request) would then leak both (decision 72's
+    // never-log list), so it prints only which fields were sent.
+    @Override
+    public String toString() {
+        return "LoginRequest[email=" + (email == null ? "absent" : "<redacted>")
+                + ", password=" + (password == null ? "absent" : "<redacted>") + "]";
+    }
 }

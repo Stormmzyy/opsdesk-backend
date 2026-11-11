@@ -110,5 +110,13 @@ public class AuthService {
     }
 
     public record LoginResult(String token, AppUser user) {
+
+        // The generated toString() would print the signed token, which is a
+        // working credential until it expires (decision 72: never log a token,
+        // or any part of one). The user is named by id only.
+        @Override
+        public String toString() {
+            return "LoginResult[token=<redacted>, user=" + user.getId() + "]";
+        }
     }
 }

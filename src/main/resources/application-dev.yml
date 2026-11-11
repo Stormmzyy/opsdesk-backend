@@ -29,3 +29,9 @@ app:
     # a database holding only the seeded sample data, and nowhere else. A
     # production run never sees it: application.yml has no usable default.
     secret: ${JWT_SECRET:dev-only-secret-change-me-at-least-32-chars}
+
+logging:
+  level:
+    # This application's DEBUG lines (decision 72), e.g. a request with an
+    # expired token, which production doesn't show.
+    com.opsdesk.backend: DEBUG

@@ -19,8 +19,19 @@
 # new production database starts with no users. The first admin is created
 # by registering and promoting that account with SQL (README).
 #
-# Only settings that differ from the shared ones go here: no SQL.
+# Only settings that differ from the shared ones go here: no SQL, and the
+# logging levels below (decision 72).
 spring:
   jpa:
     # Never print SQL in production: statements can carry user data.
     show-sql: false
+
+# Logging, stated explicitly so nobody has to work out what production gets:
+# INFO for this application, no SQL, and no DEBUG anywhere. Investigating a
+# problem in production means raising one logger for a while, never this
+# whole file (decision 72: DEBUG switched on in production is the day every
+# password from every login would reach the log, if anything logged bodies).
+logging:
+  level:
+    com.opsdesk.backend: INFO
+    org.hibernate.SQL: WARN

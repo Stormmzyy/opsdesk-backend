@@ -85,4 +85,18 @@ public record RegisterRequest(
     String passwordText() {
         return (String) password;
     }
+
+    // A record's generated toString() prints every field: here the password,
+    // and the name, username and email, all personal. Nothing logs a request
+    // today, but one log.debug("{}", request) would leak them all (decision
+    // 72's never-log list), so it prints only which fields were sent.
+    @Override
+    public String toString() {
+        return "RegisterRequest[name=" + sent(name) + ", username=" + sent(username) + ", email=" + sent(email)
+                + ", password=" + sent(password) + "]";
+    }
+
+    private static String sent(Object value) {
+        return value == null ? "absent" : "<redacted>";
+    }
 }

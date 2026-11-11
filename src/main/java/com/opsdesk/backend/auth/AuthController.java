@@ -1,5 +1,7 @@
 package com.opsdesk.backend.auth;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -26,6 +28,8 @@ import jakarta.validation.Valid;
 @RequestMapping("/api/v1/auth")
 public class AuthController {
 
+    private static final Logger log = LoggerFactory.getLogger(AuthController.class);
+
     private final AuthService authService;
 
     public AuthController(AuthService authService) {
@@ -38,8 +42,14 @@ public class AuthController {
     @PostMapping("/register")
     @ResponseStatus(HttpStatus.CREATED)
     public UserResponse register(@Valid @RequestBody RegisterRequest request) {
-        return UserResponse.from(authService.register(
-                request.nameText(), request.usernameText(), request.emailText(), request.passwordText()));
+        AppUser registered = authService.register(
+                request.nameText(), request.usernameText(), request.emailText(), request.passwordText());
+        // A normal event, at INFO (decision 72). Logged here, after the
+        // service has returned, so it's only written for an account that was
+        // really saved. The new user's id and role only: not the name, the
+        // username or the email, and of course not the password.
+        log.info("User {} registered, with role {}", registered.getId(), registered.getRole());
+        return UserResponse.from(registered);
     }
 
     // 200 OK, not 201 (decision 20): a JWT is stateless, so logging in

@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -48,6 +50,8 @@ import jakarta.validation.Valid;
 @RestController
 @RequestMapping("/api/v1/tickets")
 public class TicketController {
+
+    private static final Logger log = LoggerFactory.getLogger(TicketController.class);
 
     private final TicketService ticketService;
 
@@ -308,14 +312,23 @@ public class TicketController {
     // change both, or the HTTP gate and the service rule will disagree about
     // who may assign.
     //
-    // The response is the contract's ticket, which has no assignee field
-    // yet, so it can't show who the ticket is now assigned to. Adding one is
-    // a contract change for Thursday.
+    // The response is the contract's ticket, which shows who it's now
+    // assigned to (assigneeId and assigneeName, decision 49).
+    //
+    // A normal event, logged at INFO (decision 72) here, after the service
+    // has returned: its transaction has committed by then, so a stale write
+    // refused at commit (a 409) is never logged as an assignment. Ids only:
+    // the ticket, the assignee and who did it. An assignment that changes
+    // nothing (the same person again) is a 200 that writes nothing, and is
+    // still logged, as what was asked for.
     @PatchMapping("/{id}/assignee")
     @PreAuthorize("hasAnyRole('ADMIN', 'MANAGER')")
     public TicketResponse assignTicket(@PathVariable String id, @Valid @RequestBody AssignTicketRequest request,
                                        @AuthenticationPrincipal AppUser actor) {
-        return TicketResponse.from(ticketService.assignTicket(id, actor, request.assigneeIdValue()));
+        Ticket assigned = ticketService.assignTicket(id, actor, request.assigneeIdValue());
+        log.info("Ticket {} assigned to user {} by {} user {}", assigned.getId(), request.assigneeIdValue(),
+                actor.getRole(), actor.getId());
+        return TicketResponse.from(assigned);
     }
 
     // DELETE /api/v1/tickets/{id}/assignee -> 200 with the ticket, now
@@ -327,7 +340,9 @@ public class TicketController {
     @DeleteMapping("/{id}/assignee")
     @PreAuthorize("hasAnyRole('ADMIN', 'MANAGER')")
     public TicketResponse unassignTicket(@PathVariable String id, @AuthenticationPrincipal AppUser actor) {
-        return TicketResponse.from(ticketService.assignTicket(id, actor, null));
+        Ticket unassigned = ticketService.assignTicket(id, actor, null);
+        log.info("Ticket {} unassigned by {} user {}", unassigned.getId(), actor.getRole(), actor.getId());
+        return TicketResponse.from(unassigned);
     }
 
     // No error handlers here any more. Every error, from this controller or

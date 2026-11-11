@@ -33,6 +33,30 @@ spring:
     url: ${DB_URL:}
     username: ${DB_USER:}
     password: ${DB_PASSWORD:}
+    hikari:
+      data-source-properties:
+        # Keeps the VALUES out of every database error message (decision 72's
+        # never-log list). By default the PostgreSQL driver appends the
+        # server's "Detail" line to an exception's message: "Key
+        # (email)=(ama@example.com) already exists" for a duplicate, and
+        # "Failing row contains (...)", the WHOLE row, for a CHECK or NOT NULL
+        # violation. On app_user that row would include the email and the
+        # password hash. Those messages are what Hibernate logs at WARN and
+        # what the 500 handler logs, so both carried them (found by the Week 8
+        # log audit). With this off, the message keeps what diagnoses the
+        # problem (the error, its SQLState, the constraint's name, and the
+        # statement with "?" for every value) and loses only the values.
+        #
+        # THE COST, in every profile, development included: a constraint
+        # failure no longer says WHICH row or value broke it. The "Detail:
+        # Failing row contains (...)" and "Key (...)=(...)" lines are gone
+        # from the log. What's left to diagnose with is the SQLState (23505
+        # unique, 23514 check, 23502 not null), the constraint's name (look
+        # it up in the schema to see which columns it covers) and the
+        # statement. To see the values while debugging locally, reproduce the
+        # failing statement in psql against the dev database; don't switch
+        # this on, since the dev log gets copied into tickets and chats too.
+        logServerErrorDetail: false
   jpa:
     hibernate:
       # Creates and updates tables to match the entities. No migrations yet
@@ -41,6 +65,13 @@ spring:
       # matters.
       ddl-auto: update
     open-in-view: false
+  mvc:
+    # Spring's default (false), stated so nobody switches it on casually. When
+    # true, Spring logs every exception a handler resolved at WARN, as
+    # "Resolved [<exception>]", and for a 400 that string includes "rejected
+    # value [...]" for each failing field: a refused registration's password
+    # and email (measured in Week 8). See the pinned logger below.
+    log-resolved-exception: false
 
 app:
   jwt:
@@ -57,3 +88,38 @@ app:
     # How long a token from login stays valid. After that the client logs in
     # again; there is no refresh token.
     expiry-minutes: 60
+
+# Logging (decision 72). These are production's levels, as everything in this
+# file is: INFO for this application (refusals at WARN, normal events at INFO,
+# expired tokens at DEBUG and so not shown), and Spring's own defaults for the
+# rest. application-dev.yml turns the detail up; application-prod.yml states
+# production's choices explicitly.
+#
+# Never logged, at any level (the never-log list): passwords, tokens or any
+# part of one, password hashes, JWT_SECRET and the database password, whole
+# request or response bodies, raw query strings, email addresses, and user
+# input that still has line breaks in it.
+logging:
+  level:
+    com.opsdesk.backend: INFO
+    # Hibernate's SQL error logger (org.hibernate.orm.jdbc.error) stays at its
+    # default, WARN, on purpose. It logs EVERY SQL error Hibernate converts,
+    # not only constraint violations: lost connections, deadlocks, lock and
+    # statement timeouts, serialization failures, values too long, SQL syntax
+    # errors. For an error our code catches and recovers from (today, only the
+    # registration race in AuthService), it's the only record there is.
+    # Raising it to ERROR (tried in Week 8 to stop it printing an email) would
+    # have hidden all of those. The email came from the driver's "Detail"
+    # line, so it's removed at the source instead: logServerErrorDetail above.
+    #
+    # Pinned at INFO, whatever "org.springframework.web" or root is set to.
+    # Before any @ExceptionHandler runs, this resolver logs "Resolved
+    # [<exception>]" at DEBUG, and a 400's exception (MethodArgumentNotValid)
+    # prints "rejected value [...]" for every failing field: the password of
+    # a refused registration or login, and the email. Turning on
+    # org.springframework.web=DEBUG to chase a request problem is routine, and
+    # without this line it writes passwords to the log (measured in Week 8).
+    # A logger's own level beats its parent's, so only changing THIS line
+    # brings it back. INFO, not ERROR: the same logger reports, at WARN, an
+    # @ExceptionHandler that itself fails, and that should stay visible.
+    org.springframework.web.servlet.mvc.method.annotation.ExceptionHandlerExceptionResolver: INFO

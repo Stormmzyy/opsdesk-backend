@@ -69,8 +69,17 @@ public class GlobalExceptionHandler {
 
     // 401 UNAUTHORIZED: a login with an unknown email or a wrong password,
     // which get this same answer (AuthService.login).
+    //
+    // Logged at WARN (decision 72): without it, someone guessing passwords
+    // leaves no trace at all. What's logged is that a login was refused and
+    // where the request came from. NOT the email that was tried (personal
+    // data, and for a mistyped password usually a real person's), and never
+    // the password. The client address is what lets someone reading the log
+    // see many refusals from one place.
     @ExceptionHandler(InvalidCredentialsException.class)
-    public ResponseEntity<ApiError> handleInvalidCredentials(InvalidCredentialsException exception) {
+    public ResponseEntity<ApiError> handleInvalidCredentials(InvalidCredentialsException exception,
+                                                             HttpServletRequest request) {
+        log.warn("Login refused (unknown email or wrong password) from {}", request.getRemoteAddr());
         return respond(HttpStatus.UNAUTHORIZED, ApiError.unauthorized(exception.getMessage()));
     }
 
@@ -134,10 +143,13 @@ public class GlobalExceptionHandler {
         return respond(HttpStatus.CONFLICT, ApiError.concurrentChange());
     }
 
+    // The caller as the log names them: role and user id, never the email
+    // (decision 72). The id identifies the person just as well for whoever
+    // reads the log, and isn't personal data on its own; the email is.
     private static String describeCaller() {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         if (authentication != null && authentication.getPrincipal() instanceof AppUser user) {
-            return user.getRole() + " " + user.getEmail() + " (user " + user.getId() + ")";
+            return user.getRole() + " user " + user.getId();
         }
         return "an unauthenticated caller";
     }
