@@ -1,5 +1,7 @@
 # OpsDesk backend
 
+[![Backend CI](https://github.com/Stormmzyy/opsdesk-backend/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Stormmzyy/opsdesk-backend/actions/workflows/ci.yml)
+
 The backend for OpsDesk, an internal operations desk where staff raise support tickets, move them through a workflow, and see what each team is working on.
 
 It is a Spring Boot REST API backed by PostgreSQL. It implements the API contract written in Week 4, which lives in the frontend repo: [opsdesk-frontend/API_CONTRACT.md](https://github.com/Stormmzyy/opsdesk-frontend/blob/main/API_CONTRACT.md). If this code and the contract disagree, the contract wins.
