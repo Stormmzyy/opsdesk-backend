@@ -1291,6 +1291,200 @@ Removing the default alone isn't enough. Spring's own failure reads "Could not r
 - **A flag such as `app.seed.enabled`, defaulting to `true`.** That's the same mistake as decision 68's default: safe only when someone remembers to switch it off. Defaulting to `false` is just the profile again, with a second switch that has to be kept in step with it.
 - **Let it seed, then delete the seeded users by hand after the first start.** The accounts exist from the first start until someone remembers, and the step has to be repeated on every new database. A precaution that depends on someone remembering it, every time, isn't a reliable one.
 
+### 70. The frontend keeps the token in `localStorage`. Acceptable under four conditions, and the list of what would end it
+
+**Status: decided in Week 8. The frontend has no sign-in yet (checked on `opsdesk-frontend` `week-8-release`: no token, no `Authorization` header anywhere in `src/`), so this decides code that doesn't exist yet.**
+
+**The decision.** After login, the frontend stores the token in `localStorage` and adds it as `Authorization: Bearer …` to every request. On a 401 it deletes the token and sends the person to the login page.
+
+**The risk, stated plainly.** Any JavaScript running on the page can read `localStorage`: ours, a dependency's, a browser extension's, or an attacker's through an XSS hole. One XSS bug is enough to copy the token and use it from anywhere until it expires. The server can't tell that use apart from the real person, because a valid signature is all it checks (decision 68). The frontend README's Week 4 section already says this, and says that this is why the token decision was left to Week 8.
+
+**Why it's acceptable here, and only while all four hold:**
+1. **No way to inject script has been found.** The Week 4 audit found no `dangerouslySetInnerHTML` in `src/` or `index.html`. Every user-typed text (titles, descriptions) reaches the page through JSX, which React escapes. No user text goes into an `href`.
+2. **No third-party script runs on the page.** The runtime dependencies are React, React DOM, React Router, Redux Toolkit and React Redux: no analytics, no chat widget, no script from a CDN. Any third-party script could read the token, so it would be part of what we trust.
+3. **Tokens are short-lived.** `expiry-minutes: 60` with no refresh token. A stolen token is usable for at most an hour.
+4. **The data is low-stakes.** Internal tickets, sample users, and no external customers.
+
+**What would have to change for it not to be acceptable.** Any one of these ends the decision and reopens it:
+- user text rendered as HTML (for example, markdown in descriptions), or any `dangerouslySetInnerHTML`
+- the first third-party script on the page
+- a longer expiry or a refresh token, which would make a stolen token worth more
+- real customers or personal data in the tickets
+- the frontend and backend served from the same site, which removes most of the cost of the cookie (below)
+
+**Rejected: an `httpOnly`, `Secure`, `SameSite` cookie set by the server.** That's what a real product would use, and it's the right default. **Where I disagree with "a secure cookie is the real answer":** it protects less than it sounds like, and it costs more here than it sounds like.
+- **What it protects.** JavaScript can't read the cookie, so an XSS bug can't **copy** the token. It can still **use** it: the attacker's script runs inside our page, and the browser attaches the cookie to the requests that script makes. So it isn't protection from XSS. Escaping is the protection from XSS. Where the token lives decides what kind of loss an XSS bug causes.
+- **The two are different kinds of loss, not different sizes of one.**
+  - **A token copied out of `localStorage` is a persistent credential.** It works from the attacker's own machine, with their own tools, after the victim's tab is closed, until it expires. Nothing the victim does (closing the tab, logging out) stops it, because there is no server-side revocation.
+  - **A usable `httpOnly` cookie is a transient capability.** It works only from inside the victim's page, on our origin, while that page is open. When the tab closes, the attacker has nothing.
+
+  The 60-minute expiry is what bounds the first kind. That's why it's one of the four conditions above, and why a longer expiry or a refresh token ends this decision: either one turns a bounded persistent credential into an unbounded one.
+- **What it costs here.**
+  - **CSRF comes back.** `SecurityConfig` turns CSRF protection off with the reasoning that "a Bearer token is never sent automatically". A cookie is sent automatically, so that reasoning stops holding, and CSRF needs `SameSite` plus a CSRF token on every write.
+  - **The two apps are on different origins** (Vite on 5173, the API on 8080, and different hosts once deployed). A cookie sent across sites needs `SameSite=None; Secure`, which needs HTTPS, plus CORS with credentials allowed.
+  - **Login and logout change shape.** The login body no longer carries the token, and logout needs an endpoint to clear the cookie.
+
+  That's a contract change, a security-config change and a CSRF design, in the week the stack is being packaged. With all four conditions holding, the cookie mainly narrows a window that is already an hour. Revisit when one of the conditions stops holding.
+- **Rejected: `sessionStorage`.** Script reads it the same way, so XSS steals it the same way. It only shortens the token's life to the tab, and costs a login per tab.
+- **Rejected: keep it only in memory (the Redux store).** Script can still reach it, less directly, and every page refresh logs the person out.
+
+### 71. The Edit page sends only the fields that changed. This mitigates decision 40's stale-form hole for our frontend; it doesn't close it. Decision 34 stays "present and different" this week
+
+**Status: decided in Week 8. The change is in the frontend.**
+
+**The answer to the question is "not today".** `EditTicketPage.tsx` still saves with `updateTicket({ id: savedId, ...values })`, which sends the whole form (checked on `opsdesk-frontend` `week-8-release`). So decision 40's hole is open exactly as described there: Daniel fixes a title on a stale form and silently reverts Kwame's status.
+
+**The decision.** The Edit page compares the form's values with the values the form **started with**, and PATCHes only the fields that differ. If nothing differs, it sends no request at all.
+- **"The values the form started with", not the ticket as it is now in RTK Query's cache.** The cache can refetch while the form is open (when the window regains focus, or when another mutation invalidates it). Comparing against a refetched ticket would produce the wrong difference in both directions. It would drop a field the person changed back to what the server now holds, and it would keep a field the person never touched that someone else changed. The baseline is a snapshot taken when the form is filled.
+- **Nothing changed, no request.** There's nothing to save, and the page goes back to the ticket as if it had saved. What the server does with a `{}` PATCH is never tested by a real client, so it doesn't need to be decided.
+- **A test for it.** It goes in the frontend tests with the request inspected: change only the title, and the PATCH body holds exactly `title`. Without that test, the next refactor back to `{...values}` reopens the hole silently, because every screen still works.
+
+**The board's move already sends only `status`, and Create sends the whole form, correctly.** Only the Edit page changes. No contract change is needed: a PATCH with fewer fields is already valid (decision 40).
+
+**Mitigated for our frontend, not closed.** The hole was never a server-side defect. It's what any client gets when it sends the whole form (decision 40: the server can't tell "I want this value" from "this was the value when my page loaded"). Fixing one client fixes that client. **Any client that sends the whole form reopens it**, and after Tuesday there's one in the system already: Swagger's "Try it out" pre-fills a PATCH with every field (the fourth argument below). An ADMIN who loads a ticket in Swagger, waits, and sends that body reverts whatever changed in between, exactly as Daniel does in decision 40. So v1.0.0 can't claim "edits never silently revert other people's changes". It can claim that **the OpsDesk frontend** no longer does it, and that the server stops two requests in flight from losing each other's writes (decision 38). Closing it for every client needs `If-Match` (rejected below, for cost), and that remains the only server-side fix.
+
+**What it fixes for our frontend, and what it doesn't.** It removes the revert of fields nobody touched, for every role. It leaves the genuine same-field conflict (both people changed the title, and the later save wins), which decision 40 already accepted. It also removes the misleading 403 that a USER gets on a stale form (decision 40, first bullet), because her title fix no longer carries the old priority.
+
+**Decision 34: not changed this week. Here is the argument.** Decision 40 said it *can* become "present at all" once the page sends only changes. It can, and it shouldn't, this week:
+- **There's no security gain.** "Present and different" refuses every request that would move a USER's ticket. The only extra requests "present at all" refuses are no-ops, which can't move anything. It's simpler to state, but it isn't stricter in any way that matters.
+- **It's a breaking change, in release week.** A body that answers 200 today would answer 403. Decision 67 allows that inside the project, but it's still a contract change, a pinned-test change and a walk change, in the week the goal is to package what already works.
+- **It's only safe after the frontend change ships, never with it.** If the backend tightened first, every USER edit through today's page would be a 403. So the order is fixed: frontend first, then measure, then tighten. Tying the two together this week turns a frontend-only change into a deploy that has to happen in the right order.
+- **Other clients would break.** Swagger's "Try it out" (decision 73) pre-fills a PATCH body with every field. A USER who tried it would get a 403 under "present at all", for a body that changes nothing.
+
+Revisit it after the frontend change has been live for a week, with a smaller question: does anything still send unchanged fields? If nothing does, "present at all" costs nothing. That's when to take it.
+
+**Rejected: tighten decision 34 now, together with the frontend change.** Covered above: no gain, a deploy-order risk, and Swagger breaks.
+
+**Rejected: `If-Match`.** Decision 40 already rejected it for cost, and that still holds. The diff removes the dangerous part (reverting status) without any contract work.
+
+### 72. What gets logged, at what level, and what is never logged
+
+**Status: decided in Week 8. The never-log list applies from now on. The two additions under "What's missing" are Tuesday code.**
+
+**The levels.**
+| Level | Means | In OpsDesk |
+| --- | --- | --- |
+| `ERROR` | Something is broken, and someone should look | the catch-all 500 in `GlobalExceptionHandler`, with the stack trace |
+| `WARN` | The system worked, but a request was refused, and a stream of them means something | the 403 and 409 lines; added: login failures and rejected tokens |
+| `INFO` | What the application did, at the level of starting and stopping | Spring's startup and shutdown lines, the active profiles |
+| `DEBUG` | Only switched on while investigating | SQL (`show-sql` stays off by default) |
+
+Successful requests aren't logged one by one. At this size it would be noise, and it is the line most likely to start carrying bodies.
+
+**The never-log list.**
+- passwords, in any form, including a failed login's
+- tokens: the `Authorization` header, the JWT, or any part of it
+- password hashes
+- `JWT_SECRET`, and the database password
+- whole request bodies and whole response bodies
+- **added from the OWASP Logging Cheat Sheet:**
+  - **Database connection strings.** Today's JDBC URL has no password in it. A URL with `?password=` would, so the database password stays in its own variable and never in the URL.
+  - **Encryption keys and other primary secrets.** `JWT_SECRET` is the only one today. The rule is for the next one.
+  - **Raw query strings.** OWASP says to treat input as untrusted and to limit its size. Search terms (`?q=`) are free text people type, which may be names or worse. The current lines log `getRequestURI()`, which leaves out the query string. That's correct and stays that way.
+  - **Unsanitized user input, because of log injection.** A CR or LF in a logged value can forge a fake log line. OWASP is explicit that parameterized logging alone doesn't prevent this. What's logged today is safe, for reasons that should stay true: the email can't contain whitespace (`RegisterRequest`'s pattern excludes `\s`, which includes CR and LF), and `getRequestURI()` is not decoded, so `%0A` stays as three harmless characters. Any new line that logs a title, description, username or decoded path has to strip CR and LF first.
+  - **Personal data: the email address.** OWASP lists email addresses as personal data that should be "removed, masked, sanitized, hashed or encrypted" before it's logged. See below.
+
+**What the existing WARN lines log, and whether any of it is on the list.**
+- **403:** the method, the path (which holds the ticket id), and `describeCaller()` (role, email, user id). Then the exception's message, which for `TicketService`'s refusals is `refusal()`'s text: **role, email and user id again**, the ticket id, and the rule.
+- **409:** the method, the path, `describeCaller()` (role, email, user id), the entity's class name, its id, and Spring's exception message, which names the entity and id.
+- **Not on the list:** neither line logs a password, token, hash, secret, body or query string.
+- **On OWASP's extended list: the email, and it's logged twice on every ticket-rule 403.** The user id identifies the person just as well for anyone reading the log, and it isn't personal data on its own. **The decision:** `describeCaller()` and `refusal()` log the role and the user id, not the email. That is one line each. The 403 line already names the caller, so `refusal()` drops its own copy of who and keeps where and which rule. The tests that check the refusal's logged reason (decision 63) are checked for the email when this is done.
+- **Also checked: the 500 line.** It logs the whole exception, which is right, and is where a value can leak. A PostgreSQL constraint error's detail quotes the value (`Key (email)=(…) already exists`). That's acceptable, because the 500 is for when something is broken, and registering a taken email is handled before it reaches the 500 (decision 31). It's noted so that nobody routes an expected error through the catch-all.
+
+**What's missing, according to OWASP's "always log" list.** It says to always log authentication successes and failures, and to log suspicious JWT validation failures. Today neither is logged:
+- **`AuthService`'s failed login: add one WARN line**, with the attempted email masked or omitted and the client address. Not the password. Without it, a password-guessing attack leaves no trace at all.
+- **`JwtAuthFilter` catches `JwtException` and moves on silently: log it, at a level that depends on the cause.** jjwt's exception types already tell the causes apart. Each line names the exception class and the path, never the token.
+  - **`ExpiredJwtException`: DEBUG.** An expired token is routine. A tab left open past the hour keeps polling in the background, and at WARN it would write a line every few seconds, burying the line that matters.
+  - **`SignatureException` (jjwt 0.12's `io.jsonwebtoken.security.SignatureException`) and `MalformedJwtException`: WARN.** A token whose signature doesn't verify, or that isn't a JWT at all, wasn't issued by this server. Someone is sending something they made up. That's suspicious by the level table above, and a stream of them is the forging attack decision 68 is about.
+  - **Any other `JwtException`: WARN**, so that a cause nobody expected is seen, not hidden at DEBUG.
+
+Successful logins stay unlogged for now, as noise at this size. That's a deliberate gap against OWASP's list, recorded here as one.
+
+**Rejected: log the whole request at DEBUG, to make debugging easy.** DEBUG gets switched on in production while investigating, and on that day every password from every login goes into the log. A rule with an exception for "only at DEBUG" doesn't hold.
+
+**Rejected: mask the token, for example keep its first 10 characters.** A JWT's first characters are its header, which is the same for every token, so they identify nothing. Logging part of a secret only invites logging a bit more of it. When a request needs identifying, the user id does it.
+
+### 73. Swagger and `API_CONTRACT.md` split the API description between them. Neither is the single source of truth
+
+**Status: provisional. Decided in Week 8 before springdoc is added, and final only after Thursday checks it against the real generated output.**
+
+**What below is prediction, not observation.** springdoc isn't in the pom yet, so nothing here was seen in a generated document. "`title: object`" and "login claims 409" are what springdoc's documented behaviour predicts for this code. Thursday confirms or refutes each one against the real `/v3/api-docs`, and the split is final only then.
+
+**Thursday also checks one thing that could move the split.** A schema annotation on the `Object` fields, for example `@Schema(implementation = String.class)` or `@Schema(type = "string", allowableValues = {...})`, may make springdoc render the real type and the enum values. **If it does, request bodies move into Swagger's half, and this decision changes.** The cost to weigh then: the allowed values would be written twice, in the annotation and in the validator, unless one is built from the other (for example, `allowableValues` taken from the enum).
+
+**I agree that neither wins outright. I disagree that the generator's half is as large as it looks.** springdoc reads the code, and this code is predicted to defeat it in three places:
+- **Request bodies.** The request records' fields are `Object` (decision 10), so that a wrong type reaches validation as a `VALIDATION_ERROR` instead of a Jackson `BAD_REQUEST`. The generated schema says `title: object` and `priority: object`, which is true and useless. It knows nothing about the allowed enum values, the trimming or the length limits.
+- **Status codes.** springdoc attaches every `@ExceptionHandler` in a `@ControllerAdvice` to every operation. `GlobalExceptionHandler` handles 403, 409, 404 and the 400s, so the generated page would say login can answer 409 and `GET /tickets` can answer 409. The lists are complete and wrong.
+- **The output-only fields.** The generated request schema leaves out `assigneeId`, `version` and the rest (they aren't on the request records), so it doesn't say that sending them is a 400 (decision 40).
+
+Annotating every endpoint by hand would fix all three, and would also make a second hand-written copy of the contract, inside the code, which is the thing a generated doc is meant to avoid.
+
+**The split.**
+- **Swagger owns what it reads correctly from the code:**
+  - which paths and methods exist
+  - path and query parameters, with their names and types
+  - **response** shapes, which come from real typed records (`TicketResponse`, the user shape, the page envelope)
+- **`API_CONTRACT.md` owns everything else:**
+  - request bodies: fields, types, allowed values, limits, and which fields are refused
+  - which status codes each endpoint actually returns
+  - the error envelope and its codes
+  - the permission table, decision 22's check order, decision 23's 404 for hidden tickets, decision 24's 401 for unknown paths
+  - send only changed fields (decision 71), casing, sorting, pagination, versioning
+  - every example
+- **Swagger's annotations don't restate rules.** An operation's description says what it does in one line and links to the contract's section. That leaves nothing in Swagger that can disagree with the contract's half.
+
+**How a reader knows which to believe.**
+- **A disagreement inside Swagger's half (a path, a parameter, a response field): Swagger describes what the server does today**, because it's generated from the running code. The contract is out of date, or the code has drifted from what was agreed. Either way, it's a bug to fix in one of the two. It's never a choice a client makes.
+- **Inside the contract's half, Swagger has nothing to say, by the rule above.** If Swagger appears to say something there (for example its inferred status-code list), the contract wins, and the generated page carries a line at the top saying so.
+- **Is the code or the document wrong? `ApiContractTest` decides.** That's the next point.
+
+**What happens to the 23 pinned examples.** They stay in `API_CONTRACT.md`, stay pinned, and become more important, not less. Examples belong to the contract's half. And they are the one place where the two halves overlap and are checked: each pinned example is a full response body, compared `STRICT` with what the code returns (decision 66), and Swagger's response schema is generated from the same code. So on a green build, a pinned example and Swagger's schema can't disagree about a response's fields. If they ever seemed to, the test would already be red. The 14 unpinned captures are where a disagreement can hide, as decision 66 already says. Nothing about them changes.
+
+**Rejected: Swagger as the single source, with the contract deleted or reduced to links.** It would lose the permission table, the check order and the hidden-ticket 404. Those are the rules a client most needs and is most likely to "fix" when one looks like a bug (decision 23). It would also make the request bodies `object`.
+
+**Rejected: the contract as the single source, with no Swagger.** It loses the one description that can't go stale for paths and response fields, and an interactive page that a tester can use without curl. The contract's paths and shapes have been hand-maintained for four weeks, and decision 60 exists because hand-maintained captures drift.
+
+**Rejected: generate the contract from an OpenAPI file written first (design-first).** That's the right shape for a team whose API is consumed by people it never meets. Here it would mean rewriting a working, tested contract into YAML during release week, and the YAML still couldn't express the check order.
+
+### 74. Swagger's paths and `/actuator/health` are open without a token. A deliberate deviation from decision 24, and a dev-only Swagger
+
+**Status: decided in Week 8, for Tuesday. Neither springdoc nor Actuator is in the pom yet.**
+
+**The permit list.** Exact, like decision 18's open endpoints. Nothing gets a wildcard it doesn't need.
+- `GET /actuator/health`: exactly that path, not `/actuator/**`. Every other Actuator path stays under `anyRequest().authenticated()`, so it answers decision 24's 401.
+- `/swagger-ui.html`, `/swagger-ui/**` and `/v3/api-docs/**`: what springdoc serves.
+
+**The deviation, stated as one.** Decision 24 says every path, real or not, answers 401 without a token, so an anonymous caller can't tell which paths exist. Under the two Swagger prefixes that stops being true. A path that doesn't exist, such as `/swagger-ui/nothing`, is let through security, finds no resource, and answers 404 (the Week 6 `NoResourceFoundException` body; to be confirmed on Tuesday). The cost is small: what's under those prefixes is springdoc's own static files, the same in every springdoc app, so the difference between 404 and 200 there reveals nothing about OpsDesk. The reason it's accepted: a token can't be sent with the browser's plain GET that loads the Swagger page, so the page can't be behind the filter and still open in a browser.
+
+**Where I disagree with the framing: the 404s under the prefix are the small part. `/v3/api-docs` is the large part.** It answers 200 with a list of every path, method and parameter, which is exactly the map of endpoints that decision 24 makes a token-less caller unable to build. Open in production, it wouldn't make decision 24's 401s less uniform. It would make them pointless.
+
+The counterargument is that the repositories are public, so the map is already published. That's true of the code, but the code doesn't say which version is deployed. A live `/v3/api-docs` tells a stranger exactly what this particular server runs.
+
+**So the decision is that Swagger is enabled only under the `dev` profile**, the same pattern as decisions 68 and 69:
+- `springdoc.api-docs.enabled: false` and `springdoc.swagger-ui.enabled: false` in `application.yml`, and `true` in `application-dev.yml`.
+- The Swagger permit lines are added only when those properties are on, so that in production the prefixes fall back to `anyRequest().authenticated()`.
+- **In production, decision 24 holds with no exceptions except health.** The deviation above exists only in `dev`, where there's nothing to protect.
+
+**This conflicts with Friday's deliverables, deliberately.** The deliverable list asks for live Swagger documentation with a working bearer-token login, and the demo says to show the Swagger page. Under this decision, a production deployment serves neither. So:
+- **Swagger is demonstrated against a backend started with the `dev` profile**, which is the same backend the walk runs against (decision 69), so the demo needs no extra setup. The bearer login works there: log in through `/auth/login` in Swagger, paste the token into "Authorize", and call any endpoint.
+- **A production deployment doesn't serve it, on purpose**, for the reason above: a live `/v3/api-docs` hands an anonymous caller the exact endpoint map of the version that's deployed, which is what decision 24 refuses to give. The demo says so out loud, so "it isn't in production" is presented as a decision, not discovered as a gap.
+- **The deliverable is met as "live Swagger documentation from the running code, in development".** If the deliverable is read as requiring Swagger in production, that's a disagreement with this decision, to be settled before Friday, not by quietly switching it on.
+
+**Does an open health endpoint tell an anonymous caller anything it shouldn't?** Not with the settings below, and these settings are part of the decision:
+- **`management.endpoint.health.show-details: never`** (Boot's default, written out so nobody changes it without seeing this). The body is then `{"status":"UP"}` only. With details on, it would add the database product and version, disk space and free bytes, and the components in use, all to an anonymous caller.
+- **Exposure: `management.endpoints.web.exposure.include: health`**, also Boot's default, written out. `env`, `configprops`, `loggers` and `heapdump` are never exposed. A heap dump would contain `JWT_SECRET` and every token in memory.
+
+**What it does tell them, and why that's acceptable:**
+- **That the server is up.** Any 401 tells them that too.
+- **That it's a Spring Boot app.** The `/actuator/health` path and the body's shape fingerprint it. The public repos already say so.
+- **That the database is down.** The health check includes the database, so an outage shows as `DOWN`. That's information about an outage that is already happening. It isn't a way in, and it's the very thing a compose health check or a load balancer needs to see.
+
+**Rejected: put health behind a token as well.** Compose's health check and any load balancer call it without credentials. Giving them a token means a long-lived credential in the compose file, which is worse than an endpoint that says `UP`.
+
+**Rejected: Swagger open in every profile, accepting the map.** Covered above: it undoes decision 24 for exactly the caller decision 24 is about.
+
+**Rejected: Swagger behind a token in production.** The UI can't send a Bearer header with the request that loads its own page, so the page would be broken there. A Swagger page nobody can open is the same as not having one, at the cost of a filter exception.
+
 ### Comments in `AppUser` that this week makes wrong
 
 Two comments in `AppUser.java` say things arrive in **Week 8**: the password hash, and the `409 CONFLICT` for registering a taken email. Both arrive tomorrow, in Week 7, so both comments become wrong. They're fixed as part of Tuesday's work, not separately.
