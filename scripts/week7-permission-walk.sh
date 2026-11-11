@@ -6,7 +6,22 @@
 #
 # Usage, from the project root, with the app running on localhost:8080:
 #     bash scripts/week7-permission-walk.sh
-# Needs bash, curl, and docker (it reads rows with psql inside opsdesk-db).
+# Needs bash, curl, and docker (it reads rows with psql inside the database
+# container; see "Where the database is" below).
+#
+# Where the database is. Some checks read rows with psql run inside the
+# database container. That never touches a host port, which matters because
+# the compose database has no host port mapping at all. Two ways to reach it:
+#   - Default: the container started by the README's docker run command.
+#         bash scripts/week7-permission-walk.sh
+#     WALK_DB_CONTAINER=other-name overrides the name (default opsdesk-db).
+#   - Under docker compose: name the service instead. Compose looks up the
+#     container itself, because its name (e.g. opsdesk-system-db-1) depends on
+#     the project, which is exactly what made a hardcoded name break.
+#         WALK_DB_SERVICE=db COMPOSE_FILE=../opsdesk-system/compose.yaml \
+#             bash scripts/week7-permission-walk.sh
+#     COMPOSE_FILE is read by docker compose itself, not by this script; leave
+#     it out when running from the directory that holds the compose file.
 #
 # It assumes a schema freshly built from the entities. ddl-auto: update adds
 # columns but never drops or loosens one, so a column left over from older
@@ -47,7 +62,23 @@ if [ -z "$PRIYA" ] || [ -z "$KWAME" ] || [ -z "$DANIEL" ] || [ -z "$FATIMA" ]; t
   echo "Could not log in as the seeded users. Is the app running against a seeded database?" >&2
   exit 2
 fi
-sql() { docker exec opsdesk-db psql -U opsdesk -tAc "$1"; }
+WALK_DB_CONTAINER=${WALK_DB_CONTAINER:-opsdesk-db}
+if [ -n "$WALK_DB_SERVICE" ]; then
+  # -T: compose exec allocates a terminal by default, and inside $(...) there
+  # is none, so without it every read fails with "the input device is not a TTY".
+  sql() { docker compose exec -T "$WALK_DB_SERVICE" psql -U opsdesk -tAc "$1"; }
+  db_where="compose service '$WALK_DB_SERVICE'"
+else
+  sql() { docker exec "$WALK_DB_CONTAINER" psql -U opsdesk -tAc "$1"; }
+  db_where="container '$WALK_DB_CONTAINER'"
+fi
+# Prove the database is reachable before the first request. Otherwise a wrong
+# name surfaces 30 requests later as a row check that "failed", which points
+# at the permission rules rather than at the setup.
+if [ "$(sql 'select 1' 2>/dev/null)" != "1" ]; then
+  echo "Could not run psql in the $db_where. Is it running? (See \"Where the database is\" at the top of this script.)" >&2
+  exit 2
+fi
 n=0; failures=0
 # r "label" EXPECTED_STATUS TOKEN|- METHOD PATH [BODY]
 r() {
