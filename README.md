@@ -97,6 +97,8 @@ Use the email in lowercase, because that's how emails are stored (see [NOTES.md]
 | `JWT_SECRET` | Signs every login token: a random value of at least 32 characters | a published development value | **required** |
 | `ALLOWED_ORIGIN` | The one origin a browser may call the API from, such as `http://localhost:3000` (no path, no trailing slash) | `http://localhost:5173` | **required** |
 
+[.env.example](.env.example) lists the same variables with fake values. Copy it to `.env` (ignored by Git) for real ones; Docker Compose reads `.env`, Spring doesn't. `EnvExampleTest` fails if the file and the required settings ever disagree.
+
 **`dev` is never the default** (NOTES.md, decision 68). Without a profile the app applies production rules: every setting in the table is required, the sample data isn't loaded, and a missing setting stops it at startup with a report naming the variable and what to do, for example:
 
 ```

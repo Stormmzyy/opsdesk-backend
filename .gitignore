@@ -31,3 +31,10 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Local settings ###
+# Real values for the variables in .env.example (database password, JWT
+# secret). Never committed: .env.example is the template, with fake values.
+.env
+.env.*
+!.env.example

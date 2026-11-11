@@ -4,8 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.WebApplicationType;
@@ -38,15 +40,23 @@ class ProductionSettingsTest {
 
     // Values that let a start get past each setting without any server: an
     // in-memory H2 database, and a secret long enough for JwtService.
-    private static final Map<String, Object> ALL_SETTINGS = Map.of(
+    //
+    // Its keys ARE the list of required settings: the parameterised case
+    // below runs once per key, and EnvExampleTest checks the same keys
+    // against application.yml's empty defaults and .env.example.
+    static final Map<String, Object> ALL_SETTINGS = Map.of(
             "DB_URL", "jdbc:h2:mem:production-settings-test;DB_CLOSE_DELAY=-1",
             "DB_USER", "sa",
             "DB_PASSWORD", "not-a-real-password",
             "JWT_SECRET", "a-secret-only-for-production-settings-test",
             "ALLOWED_ORIGIN", "http://localhost:3000");
 
+    static Stream<String> requiredSettings() {
+        return ALL_SETTINGS.keySet().stream().sorted();
+    }
+
     @ParameterizedTest(name = "a prod start without {0} fails and names {0}")
-    @ValueSource(strings = {"DB_URL", "DB_USER", "DB_PASSWORD", "JWT_SECRET", "ALLOWED_ORIGIN"})
+    @MethodSource("requiredSettings")
     void aProdStartWithoutTheSettingFailsAndNamesIt(String missing) {
         Map<String, Object> settings = new HashMap<>(ALL_SETTINGS);
         settings.remove(missing);
