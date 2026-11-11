@@ -10,6 +10,7 @@ import javax.crypto.SecretKey;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import com.opsdesk.backend.config.MissingSettingException;
 import com.opsdesk.backend.user.AppUser;
 
 import io.jsonwebtoken.JwtException;
@@ -31,16 +32,42 @@ public class JwtService {
     private final SecretKey key;
     private final long expiryMinutes;
 
-    // Both values come from application.yml (app.jwt.*), and the secret from
-    // the JWT_SECRET environment variable when it's set. Same @Value in Boot 3.
+    // The shortest secret HMAC-SHA256 accepts: 32 bytes (256 bits).
+    private static final int MIN_SECRET_BYTES = 32;
+
+    // Both values come from app.jwt.* (application.yml), and the secret only
+    // from the JWT_SECRET environment variable, except under the dev and test
+    // profiles, which have their own. Same @Value in Boot 3.
     public JwtService(@Value("${app.jwt.secret}") String secret,
                       @Value("${app.jwt.expiry-minutes}") long expiryMinutes) {
+        // Checked here, when the app starts, so a missing or weak secret stops
+        // the app with one sentence that names the variable and the fix,
+        // instead of producing tokens anyone could forge (decision 68).
+        //
+        // Missing: application.yml resolves an unset JWT_SECRET to "" on
+        // purpose, so it arrives here rather than failing inside Spring with
+        // "Could not resolve placeholder". Too short: hmacShaKeyFor would
+        // refuse it anyway, but with a WeakKeyException about key bits that
+        // doesn't mention JWT_SECRET at all.
+        byte[] secretBytes = secret.getBytes(StandardCharsets.UTF_8);
+        // MissingSettingException, so MissingSettingFailureAnalyzer shows it as
+        // Spring Boot's "APPLICATION FAILED TO START" report at the end of the
+        // output, instead of the last line of a long stack trace.
+        if (secret.isBlank()) {
+            throw new MissingSettingException("JWT_SECRET", "is not set",
+                    "Set the JWT_SECRET environment variable to a random value of at least " + MIN_SECRET_BYTES
+                            + " characters (it signs every login token, so keep it secret), or, on a"
+                            + " development machine, run with SPRING_PROFILES_ACTIVE=dev.");
+        }
+        if (secretBytes.length < MIN_SECRET_BYTES) {
+            throw new MissingSettingException("JWT_SECRET",
+                    "is too short: it is " + secretBytes.length + " bytes, and it must be at least " + MIN_SECRET_BYTES,
+                    "Set the JWT_SECRET environment variable to a random value of at least " + MIN_SECRET_BYTES
+                            + " characters.");
+        }
         // HMAC-SHA: the same key both signs and verifies, so it must stay on
-        // the server. hmacShaKeyFor refuses a secret shorter than 32 bytes
-        // (256 bits) with a WeakKeyException. That happens here, when the
-        // app starts, so a too-short JWT_SECRET stops the app instead of
-        // producing tokens that are easy to forge.
-        this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+        // the server.
+        this.key = Keys.hmacShaKeyFor(secretBytes);
         this.expiryMinutes = expiryMinutes;
     }
 

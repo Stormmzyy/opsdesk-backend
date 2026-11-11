@@ -3,6 +3,9 @@ package com.opsdesk.backend.auth;
 import java.io.IOException;
 import java.util.List;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContext;
@@ -13,7 +16,10 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import com.opsdesk.backend.user.AppUser;
 import com.opsdesk.backend.user.AppUserRepository;
 
+import io.jsonwebtoken.ExpiredJwtException;
 import io.jsonwebtoken.JwtException;
+import io.jsonwebtoken.MalformedJwtException;
+import io.jsonwebtoken.security.SignatureException;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -34,6 +40,8 @@ import jakarta.servlet.http.HttpServletResponse;
 // below runs only once.
 @Component
 public class JwtAuthFilter extends OncePerRequestFilter {
+
+    private static final Logger log = LoggerFactory.getLogger(JwtAuthFilter.class);
 
     private static final String BEARER = "Bearer ";
 
@@ -76,13 +84,45 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 users.findByEmail(email).ifPresent(this::signIn);
             } catch (JwtException notValid) {
                 // A bad signature, an expired token, or not a token at all.
-                // Nothing is recorded, so the request is treated as having no
+                // No one is signed in, so the request is treated as having no
                 // token. The reason isn't sent back: the 401 is the same for
                 // every kind of invalid token, which gives an attacker
-                // probing tokens nothing to go on.
+                // probing tokens nothing to go on. It IS logged, at a level
+                // that depends on the cause (decision 72).
+                logRejectedToken(notValid, request);
             }
         }
         chain.doFilter(request, response);
+    }
+
+    // Why a token was rejected, at the level its cause deserves (decision 72).
+    // Each line names the kind of failure, the request and where it came
+    // from. NEVER the token, or any part of it: a JWT's first characters are
+    // its header, the same for every token, so a "safe prefix" identifies
+    // nothing and only invites logging more of it.
+    //
+    // - Expired: DEBUG. Routine: a tab left open past the hour keeps polling,
+    //   and at WARN it would write a line every few seconds and bury the ones
+    //   that matter.
+    // - Bad signature, or not a JWT at all: WARN. This server didn't issue it,
+    //   so someone sent something they made up; a stream of these is the
+    //   forging that decision 68 is about.
+    // - Anything else: WARN, so a cause nobody expected is seen, not hidden.
+    //
+    // getRequestURI() is not decoded, so a %0A in the path stays three
+    // harmless characters and can't start a fake log line.
+    private static void logRejectedToken(JwtException failure, HttpServletRequest request) {
+        String kind = failure.getClass().getSimpleName();
+        if (failure instanceof ExpiredJwtException) {
+            log.debug("Token rejected ({}) on {} {} from {}", kind, request.getMethod(), request.getRequestURI(),
+                    request.getRemoteAddr());
+        } else if (failure instanceof SignatureException || failure instanceof MalformedJwtException) {
+            log.warn("Token rejected, not one this server issued ({}) on {} {} from {}", kind, request.getMethod(),
+                    request.getRequestURI(), request.getRemoteAddr());
+        } else {
+            log.warn("Token rejected ({}) on {} {} from {}", kind, request.getMethod(), request.getRequestURI(),
+                    request.getRemoteAddr());
+        }
     }
 
     // The principal is the AppUser itself, so a controller can ask for it

@@ -1,8 +1,14 @@
 # The test profile (NOTES.md, decision 62). Read only when the "test" profile
 # is active, which every Spring test turns on with @ActiveProfiles("test").
 # Layered over src/main/resources/application.yml, so only what differs is
-# here; the JWT settings still come from there. It's in src/test, so it never
-# reaches the built jar and can't change how the app itself runs.
+# here. It's in src/test, so it never reaches the built jar and can't change
+# how the app itself runs.
+#
+# It needs its own JWT secret (at the end). The main file deliberately has no
+# usable default for JWT_SECRET (decision 68), so without this one every test
+# context would fail to start, and the test classes that sign in as the seeded
+# users would have nothing to sign with. The seeder runs here too: it's
+# limited to the dev and test profiles (decision 69).
 #
 # H2 in PostgreSQL compatibility mode is NOT PostgreSQL. A query that works
 # here can still break on the real database, and the other way round. This
@@ -33,3 +39,15 @@ spring:
       # dropped when it closes. The seeder then fills it with decision 27's
       # rows, exactly as it does on an empty PostgreSQL.
       ddl-auto: create-drop
+
+app:
+  jwt:
+    # TEST ONLY. Signs the tokens the tests log in with, inside the test JVM,
+    # and nowhere else. Not the dev value, so a token from a test run can't
+    # be replayed against a dev server, and the other way round. At least 32
+    # bytes, as JwtService requires.
+    secret: test-only-secret-never-used-outside-the-test-suite
+  cors:
+    # Required like every other setting (RequiredSettingsCheck). The tests
+    # don't run in a browser, so any valid origin would do; this is the dev one.
+    allowed-origin: http://localhost:5173

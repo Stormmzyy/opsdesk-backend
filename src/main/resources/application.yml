@@ -1,20 +1,173 @@
+# Shared settings, read on every run, whatever the profile.
+#
+# WHY THE BASE FILE DESCRIBES PRODUCTION: whatever is here applies when no
+# profile is set, and the safe thing for a forgotten profile to mean is
+# "production". So nothing here is a development convenience, and the settings
+# a deployment must supply have no usable default (ProductionSettingsTest
+# fails if one is put back). Development's conveniences are in
+# application-dev.yml, which only applies when asked for.
+#
+# Everything a deployment must supply comes from the environment and has NO
+# usable default here, so this file on its own describes PRODUCTION: a run
+# with no profile is a production run (NOTES.md, decision 68), and it refuses
+# to start until those values are set. Development defaults live in
+# application-dev.yml and only apply when the dev profile is switched on
+# deliberately, with SPRING_PROFILES_ACTIVE=dev. dev is never the default, so
+# a run that forgets to set a profile can't quietly become a development run.
+#
+# The files, and when each is read:
+#   application.yml        always (this file)
+#   application-dev.yml    SPRING_PROFILES_ACTIVE=dev: local defaults, the seeder
+#   application-prod.yml   SPRING_PROFILES_ACTIVE=prod: production-only settings
+#   application-test.yml   the test suite (src/test, never in the jar)
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5433/opsdesk
-    username: ${DB_USER:opsdesk}
-    password: ${DB_PASSWORD:opsdesk}
+    # The same build reaches a database on this machine
+    # (jdbc:postgresql://localhost:5433/opsdesk) or one in Docker
+    # (jdbc:postgresql://db:5432/opsdesk): only DB_URL changes.
+    #
+    # The empty defaults are deliberate, as for JWT_SECRET below. A bare
+    # ${DB_PASSWORD} that isn't set is passed on as the literal text
+    # "${DB_PASSWORD}", and the database rejects it as a WRONG password.
+    # Resolved to "", RequiredSettingsCheck reports it as MISSING instead.
+    url: ${DB_URL:}
+    username: ${DB_USER:}
+    password: ${DB_PASSWORD:}
+    hikari:
+      data-source-properties:
+        # Keeps the VALUES out of every database error message (decision 72's
+        # never-log list). By default the PostgreSQL driver appends the
+        # server's "Detail" line to an exception's message: "Key
+        # (email)=(ama@example.com) already exists" for a duplicate, and
+        # "Failing row contains (...)", the WHOLE row, for a CHECK or NOT NULL
+        # violation. On app_user that row would include the email and the
+        # password hash. Those messages are what Hibernate logs at WARN and
+        # what the 500 handler logs, so both carried them (found by the Week 8
+        # log audit). With this off, the message keeps what diagnoses the
+        # problem (the error, its SQLState, the constraint's name, and the
+        # statement with "?" for every value) and loses only the values.
+        #
+        # THE COST, in every profile, development included: a constraint
+        # failure no longer says WHICH row or value broke it. The "Detail:
+        # Failing row contains (...)" and "Key (...)=(...)" lines are gone
+        # from the log. What's left to diagnose with is the SQLState (23505
+        # unique, 23514 check, 23502 not null), the constraint's name (look
+        # it up in the schema to see which columns it covers) and the
+        # statement. To see the values while debugging locally, reproduce the
+        # failing statement in psql against the dev database; don't switch
+        # this on, since the dev log gets copied into tickets and chats too.
+        logServerErrorDetail: false
   jpa:
     hibernate:
+      # Creates and updates tables to match the entities, in EVERY profile
+      # (application-prod.yml doesn't override it). So the first start against
+      # an empty database, such as docker compose's new volume, creates the
+      # tables itself. With "validate" or "none" that first start would stop
+      # on a missing table, which looks like a configuration mistake.
+      #
+      # Acceptable here, and only here: OpsDesk has no migration tool yet, and
+      # every database it runs against can be recreated (decision 25). What
+      # "update" can't do: it only ADDS tables and columns. It never drops or
+      # renames one, never changes a column's type, and fails to add a NOT
+      # NULL column to a table that already has rows. Whatever it can't do is
+      # silently left as it was.
+      #
+      # In a real deployment: versioned migrations with Flyway (or Liquibase),
+      # run at startup before the app takes requests, and this set to
+      # "validate", so a schema that doesn't match the entities stops the
+      # start instead of being patched.
       ddl-auto: update
     open-in-view: false
+  mvc:
+    # Spring's default (false), stated so nobody switches it on casually. When
+    # true, Spring logs every exception a handler resolved at WARN, as
+    # "Resolved [<exception>]", and for a 400 that string includes "rejected
+    # value [...]" for each failing field: a refused registration's password
+    # and email (measured in Week 8). See the pinned logger below.
+    log-resolved-exception: false
 
 app:
   jwt:
-    # Read from the JWT_SECRET environment variable. The default after the
-    # colon is for local development only; any real deployment sets
-    # JWT_SECRET. It must be at least 32 characters, or JwtService refuses
-    # to start.
-    secret: ${JWT_SECRET:dev-only-secret-change-me-at-least-32-chars}
+    # The key that signs every token. Anyone who knows it can sign a token
+    # for any user with any role, so it comes only from JWT_SECRET.
+    #
+    # The empty default after the colon is deliberate, and isn't a usable
+    # default. With a bare ${JWT_SECRET}, a missing variable stops the app
+    # inside Spring with "Could not resolve placeholder", which doesn't say
+    # what to do. With ${JWT_SECRET:}, it resolves to "", and JwtService
+    # refuses that at startup with one sentence naming the variable and the
+    # fix (decision 68). Same for a secret shorter than 32 bytes.
+    secret: ${JWT_SECRET:}
     # How long a token from login stays valid. After that the client logs in
     # again; there is no refresh token.
     expiry-minutes: 60
+  cors:
+    # The one origin (scheme, host and port) whose pages may call the API from
+    # a browser. No usable default, like the settings above:
+    # RequiredSettingsCheck refuses a missing one, and "*" or a value with a
+    # path or trailing slash. Wednesday's compose passes http://localhost:3000.
+    allowed-origin: ${ALLOWED_ORIGIN:}
+
+# Actuator: health only (decision 74). It answers {"status":"UP"} or "DOWN"
+# and nothing else, on GET /actuator/health, which SecurityConfig lets through
+# without a token. No other endpoint is exposed over HTTP at all: env,
+# configprops, loggers and heapdump stay off (a heap dump would hold
+# JWT_SECRET and every token in memory).
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+      # No /actuator "discovery" page. It lists a link to every exposed
+      # endpoint, and a signed-in user could read it; health is the only
+      # endpoint, and its path is documented, so the list adds nothing.
+      discovery:
+        enabled: false
+  endpoint:
+    health:
+      # Boot adds Kubernetes-style probe groups by default, and health then
+      # answers {"groups":["liveness","readiness"],"status":"UP"}. That says
+      # more than up or down (decision 74), and nothing here deploys to
+      # Kubernetes. Switch on again if it ever does.
+      probes:
+        enabled: false
+      # Without these, health would also list each component (the database,
+      # disk space, ...) with its details: the database product and version,
+      # free disk bytes. Decision 74: up or down only.
+      show-details: never
+      show-components: never
+
+# Logging (decision 72). These are production's levels, as everything in this
+# file is: INFO for this application (refusals at WARN, normal events at INFO,
+# expired tokens at DEBUG and so not shown), and Spring's own defaults for the
+# rest. application-dev.yml turns the detail up; application-prod.yml states
+# production's choices explicitly.
+#
+# Never logged, at any level (the never-log list): passwords, tokens or any
+# part of one, password hashes, JWT_SECRET and the database password, whole
+# request or response bodies, raw query strings, email addresses, and user
+# input that still has line breaks in it.
+logging:
+  level:
+    com.opsdesk.backend: INFO
+    # Hibernate's SQL error logger (org.hibernate.orm.jdbc.error) stays at its
+    # default, WARN, on purpose. It logs EVERY SQL error Hibernate converts,
+    # not only constraint violations: lost connections, deadlocks, lock and
+    # statement timeouts, serialization failures, values too long, SQL syntax
+    # errors. For an error our code catches and recovers from (today, only the
+    # registration race in AuthService), it's the only record there is.
+    # Raising it to ERROR (tried in Week 8 to stop it printing an email) would
+    # have hidden all of those. The email came from the driver's "Detail"
+    # line, so it's removed at the source instead: logServerErrorDetail above.
+    #
+    # Pinned at INFO, whatever "org.springframework.web" or root is set to.
+    # Before any @ExceptionHandler runs, this resolver logs "Resolved
+    # [<exception>]" at DEBUG, and a 400's exception (MethodArgumentNotValid)
+    # prints "rejected value [...]" for every failing field: the password of
+    # a refused registration or login, and the email. Turning on
+    # org.springframework.web=DEBUG to chase a request problem is routine, and
+    # without this line it writes passwords to the log (measured in Week 8).
+    # A logger's own level beats its parent's, so only changing THIS line
+    # brings it back. INFO, not ERROR: the same logger reports, at WARN, an
+    # @ExceptionHandler that itself fails, and that should stay visible.
+    org.springframework.web.servlet.mvc.method.annotation.ExceptionHandlerExceptionResolver: INFO

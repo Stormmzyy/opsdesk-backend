@@ -1,0 +1,40 @@
+# Development: read only with SPRING_PROFILES_ACTIVE=dev, on top of
+# application.yml. Never the default (decision 68).
+#
+# Every value here has a default so `SPRING_PROFILES_ACTIVE=dev ./mvnw
+# spring-boot:run` works with nothing else set, against the database the
+# README's docker run command starts. Each can still be overridden from the
+# environment.
+#
+# The dev profile also switches on SampleDataSeeder (decision 69): the six
+# seeded users and their published development password exist only here and
+# in the test suite.
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/opsdesk}
+    username: ${DB_USER:opsdesk}
+    password: ${DB_PASSWORD:opsdesk}
+  jpa:
+    # More detail while developing (decision 72). Prints each SQL statement
+    # Hibernate runs. Statements only, with "?" for every value: the values
+    # themselves are logged only at TRACE on org.hibernate.orm.jdbc.bind,
+    # which nothing here switches on, so user data doesn't reach the log even
+    # in development.
+    show-sql: true
+
+app:
+  jwt:
+    # DEVELOPMENT ONLY, and public: this value has been in this repository
+    # since Week 6. Anyone can sign tokens with it, which is harmless against
+    # a database holding only the seeded sample data, and nowhere else. A
+    # production run never sees it: application.yml has no usable default.
+    secret: ${JWT_SECRET:dev-only-secret-change-me-at-least-32-chars}
+  cors:
+    # The Vite dev server.
+    allowed-origin: ${ALLOWED_ORIGIN:http://localhost:5173}
+
+logging:
+  level:
+    # This application's DEBUG lines (decision 72), e.g. a request with an
+    # expired token, which production doesn't show.
+    com.opsdesk.backend: DEBUG

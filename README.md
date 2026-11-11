@@ -88,22 +88,40 @@ Use the email in lowercase, because that's how emails are stored (see [NOTES.md]
 
 ### Environment variables
 
-| Variable | Purpose | Default |
-| --- | --- | --- |
-| `DB_USER` | Database username | `opsdesk` |
-| `DB_PASSWORD` | Database password | `opsdesk` |
+| Variable | Purpose | Under `dev` | Otherwise (`prod`, or no profile) |
+| --- | --- | --- | --- |
+| `SPRING_PROFILES_ACTIVE` | Which configuration to use: `dev` or `prod` | | (no profile means production rules) |
+| `DB_URL` | JDBC URL of the database | `jdbc:postgresql://localhost:5433/opsdesk` | **required** |
+| `DB_USER` | Database username | `opsdesk` | **required** |
+| `DB_PASSWORD` | Database password | `opsdesk` | **required** |
+| `JWT_SECRET` | Signs every login token: a random value of at least 32 characters | a published development value | **required** |
+| `ALLOWED_ORIGIN` | The one origin a browser may call the API from, such as `http://localhost:3000` (no path, no trailing slash) | `http://localhost:5173` | **required** |
 
-The defaults match the `docker run` command above, so for local development you don't need to set either one.
+[.env.example](.env.example) lists the same variables with fake values. Copy it to `.env` (ignored by Git) for real ones; Docker Compose reads `.env`, Spring doesn't. `EnvExampleTest` fails if the file and the required settings ever disagree.
+
+**`dev` is never the default** (NOTES.md, decision 68). Without a profile the app applies production rules: every setting in the table is required, the sample data isn't loaded, and a missing setting stops it at startup with a report naming the variable and what to do, for example:
+
+```
+Description:
+
+JWT_SECRET is not set.
+
+Action:
+
+Set the JWT_SECRET environment variable to a random value of at least 32 characters (it signs every login token, so keep it secret), or, on a development machine, run with SPRING_PROFILES_ACTIVE=dev.
+```
+
+Under `dev`, the defaults match the `docker run` command above, so nothing else needs setting. The same build reaches a database in Docker by setting `DB_URL`, for example `jdbc:postgresql://db:5432/opsdesk`.
 
 ## Running the app
 
-With the database running:
+With the database running, start it with the `dev` profile, which supplies the local settings and loads the sample data (the seeded accounts in [Development password](#development-password-for-the-seeded-development-database-only)):
 
 ```sh
-./mvnw spring-boot:run
+SPRING_PROFILES_ACTIVE=dev ./mvnw spring-boot:run
 ```
 
-On Windows Command Prompt or PowerShell, use `mvnw.cmd spring-boot:run` instead.
+On Windows PowerShell: `$env:SPRING_PROFILES_ACTIVE="dev"; .\mvnw.cmd spring-boot:run`. Without the profile, the app refuses to start until the production settings above are set (see [Environment variables](#environment-variables)).
 
 The API starts on <http://localhost:8080>. Stop it with Ctrl+C.
 

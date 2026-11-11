@@ -390,14 +390,16 @@ public class TicketService {
 
     // The message never reaches the client (ApiError.forbidden() has one
     // fixed message); GlobalExceptionHandler logs it at WARN. So it names
-    // everything a reader of the log needs: who, which ticket, which rule.
+    // what a reader of the log needs: which ticket and which rule. WHO is
+    // already in that log line ("for AGENT user 2"), so it isn't repeated
+    // here; and it's the user id, never the email (decision 72). Until Week
+    // 8 every ticket-rule 403 logged the caller's email twice.
     // The ticket is null when a role rule refuses before any lookup (the
     // interceptor's assign gate); the request path in the log line still
     // names it.
     private static AccessDeniedException refusal(AppUser actor, Ticket ticket, String rule) {
         String where = ticket == null ? "before the ticket was loaded" : "on ticket " + ticket.getId();
-        return new AccessDeniedException(actor.getRole() + " " + actor.getEmail() + " (user " + actor.getId()
-                + ") refused " + where + ": " + rule);
+        return new AccessDeniedException("refused " + where + ": " + rule);
     }
 
     // The contract trims free-text fields before saving them. strip() rather

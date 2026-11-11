@@ -1,0 +1,44 @@
+# What `docker build` must NOT send to the build engine.
+#
+# `docker build .` packs up this whole folder (the "build context") before it
+# reads a single line of the Dockerfile, and `COPY . .` copies from that. Git's
+# .gitignore plays no part: only this file filters the context. Without it the
+# context was 65.6 MB, 60.7 MB of it target/.
+#
+# The build needs only: mvnw, .mvn/, pom.xml and src/.
+
+# Build output from this machine. The image compiles its own; copying these in
+# would put classes compiled on a laptop, possibly stale (the Week 8 Monday
+# problem), next to or instead of the image's own.
+target/
+
+# The repository's history: every past version of every file, including any
+# secret that was ever committed and later deleted. Nothing in the build reads it.
+.git/
+
+# Real settings: DB_PASSWORD and JWT_SECRET. A file copied into a build is
+# stored in an image layer that anyone who pulls the image can read. The
+# container gets its settings from the environment at run time instead.
+.env
+.env.*
+
+# Editor, IDE and local tool settings: personal, and nothing the build reads.
+.idea/
+.vscode/
+*.iml
+.claude/
+.remember/
+
+# Not part of the build: documentation, the Windows wrapper (the image runs
+# ./mvnw), the API walk scripts (they run against a running server), and CI
+# workflows.
+*.md
+mvnw.cmd
+scripts/
+.github/
+
+# The Docker files themselves. The build never reads them from the context,
+# and leaving them out means editing one doesn't invalidate the cached
+# `COPY . .` layer.
+Dockerfile
+.dockerignore
