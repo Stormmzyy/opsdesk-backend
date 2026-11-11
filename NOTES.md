@@ -1251,7 +1251,10 @@ Someone editing either side finds the other.
 
 ### 68. `JWT_SECRET` has no default outside the `dev` profile. Without it, the app refuses to start
 
-**Status: decided in Week 8, implemented Tuesday.**
+**Status: decided in Week 8, implemented Tuesday.** As built:
+- `application.yml` describes production: the database URL, user and password and `JWT_SECRET` come from the environment, each with an **empty** default. `application-dev.yml` has the development values; `application-prod.yml` adds no defaults. The test profile has its own secret.
+- **The empty defaults are deliberate, and the finding behind them was a surprise.** This decision assumed a bare `${DB_PASSWORD}` would fail with "Could not resolve placeholder". It doesn't: Spring Boot's property binder leaves an unresolvable placeholder as literal text. A production start without `DB_PASSWORD` connected with the password `${DB_PASSWORD}` and failed with "FATAL: password authentication failed for user opsdesk", which tells a newcomer the password is *wrong*, not missing. Resolved to `""` instead, each is checked by name: `JWT_SECRET` (blank, or under 32 bytes) in `JwtService`, and the three database settings in `RequiredSettingsCheck` (a `BeanFactoryPostProcessor`, so before the DataSource tries to connect). An in-memory H2 URL, the test profile's, is the one case allowed an empty password.
+- **The failure is a report, not a stack trace.** Even with a clear sentence, it first arrived as the last `Caused by` of a 140-line trace that opened with "Unable to start web server" and "Unable to start embedded Tomcat". A Spring Boot `FailureAnalyzer` (`MissingSettingFailureAnalyzer`, registered in `META-INF/spring.factories`) turns a `MissingSettingException` into the "APPLICATION FAILED TO START / Description / Action" report at the end of the output, with no trace. Measured: `prod` with no `JWT_SECRET`, `prod` with no `DB_PASSWORD`, a 5-byte secret, and no profile at all (which stops at `DB_URL`) each end with a report naming the variable and the fix.
 
 **The finding.** `application.yml` reads `secret: ${JWT_SECRET:dev-only-secret-change-me-at-least-32-chars}`. If `JWT_SECRET` isn't set, the app starts normally and signs tokens with that default. The default has been in a public repository since Week 6. Anyone who reads it can sign a token with `"role":"ADMIN"` for any email, and the server accepts it, because a valid signature is the only thing it checks. A deployment that forgets one environment variable looks healthy and has no authentication.
 
@@ -1272,7 +1275,7 @@ Removing the default alone isn't enough. Spring's own failure reads "Could not r
 
 ### 69. `SampleDataSeeder` runs only under the `dev` and `test` profiles. Required for Wednesday, not optional
 
-**Status: decided in Week 8, implemented Tuesday, before the compose work.**
+**Status: decided in Week 8, implemented Tuesday, before the compose work.** `@Profile({"dev", "test"})` on `SampleDataSeeder`. Measured: under `dev` against a recreated database it seeds 6 users, 12 tickets and 6 projects, and the walk passes 70 of 70 requests and 37 of 37 checks; the suite (`test`) still passes all 41.
 
 **The finding.** `SampleDataSeeder` is a plain `@Component` with no `@Profile`. It fills any empty table, so the first start against any new database, including a production one, creates the six decision-27 users with the password `devpassword123`, which is published in the README. One of them, Priya, is an ADMIN.
 

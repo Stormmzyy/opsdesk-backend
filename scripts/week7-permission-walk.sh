@@ -4,7 +4,9 @@
 # seeded development password (devpassword123; README.md, "Development
 # password"). Never point it at anything but a seeded development database.
 #
-# Usage, from the project root, with the app running on localhost:8080:
+# Usage, from the project root, with the app running on localhost:8080 under
+# the dev profile (SPRING_PROFILES_ACTIVE=dev), which is the only profile that
+# seeds the users this script logs in as (decision 69):
 #     bash scripts/week7-permission-walk.sh
 # Needs bash, curl, and docker (it reads rows with psql inside the database
 # container; see "Where the database is" below).

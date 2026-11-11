@@ -1,0 +1,5 @@
+# Startup failure reports for this application's own settings (decision 68).
+# Spring Boot reads this file before the application context exists, which is
+# when a missing setting is found. See MissingSettingFailureAnalyzer.
+org.springframework.boot.diagnostics.FailureAnalyzer=\
+com.opsdesk.backend.config.MissingSettingFailureAnalyzer

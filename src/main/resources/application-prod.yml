@@ -1,0 +1,26 @@
+# Production: read with SPRING_PROFILES_ACTIVE=prod, on top of application.yml.
+#
+# WHY THIS FILE IS NEARLY EMPTY: application.yml already IS the production
+# configuration. The base file holds production's rules (every secret and
+# database setting required, no seeder) so that a run that forgets its profile
+# gets production's rules too, never development's (decision 68). This file
+# only adds what production does differently on top of that.
+#
+# What this file deliberately does NOT do is give anything a default. These
+# come from application.yml, where they have no usable default, so a
+# production start without them fails at startup instead of running with a
+# guessable value:
+#   DB_URL          e.g. jdbc:postgresql://db:5432/opsdesk inside Docker
+#   DB_USER
+#   DB_PASSWORD
+#   JWT_SECRET      a random value of at least 32 characters
+#
+# No seeder: SampleDataSeeder runs only under dev and test (decision 69), so a
+# new production database starts with no users. The first admin is created
+# by registering and promoting that account with SQL (README).
+#
+# Only settings that differ from the shared ones go here: no SQL.
+spring:
+  jpa:
+    # Never print SQL in production: statements can carry user data.
+    show-sql: false

@@ -1,20 +1,59 @@
+# Shared settings, read on every run, whatever the profile.
+#
+# WHY THE BASE FILE DESCRIBES PRODUCTION: whatever is here applies when no
+# profile is set, and the safe thing for a forgotten profile to mean is
+# "production". So nothing here is a development convenience, and the settings
+# a deployment must supply have no usable default (ProductionSettingsTest
+# fails if one is put back). Development's conveniences are in
+# application-dev.yml, which only applies when asked for.
+#
+# Everything a deployment must supply comes from the environment and has NO
+# usable default here, so this file on its own describes PRODUCTION: a run
+# with no profile is a production run (NOTES.md, decision 68), and it refuses
+# to start until those values are set. Development defaults live in
+# application-dev.yml and only apply when the dev profile is switched on
+# deliberately, with SPRING_PROFILES_ACTIVE=dev. dev is never the default, so
+# a run that forgets to set a profile can't quietly become a development run.
+#
+# The files, and when each is read:
+#   application.yml        always (this file)
+#   application-dev.yml    SPRING_PROFILES_ACTIVE=dev: local defaults, the seeder
+#   application-prod.yml   SPRING_PROFILES_ACTIVE=prod: production-only settings
+#   application-test.yml   the test suite (src/test, never in the jar)
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5433/opsdesk
-    username: ${DB_USER:opsdesk}
-    password: ${DB_PASSWORD:opsdesk}
+    # The same build reaches a database on this machine
+    # (jdbc:postgresql://localhost:5433/opsdesk) or one in Docker
+    # (jdbc:postgresql://db:5432/opsdesk): only DB_URL changes.
+    #
+    # The empty defaults are deliberate, as for JWT_SECRET below. A bare
+    # ${DB_PASSWORD} that isn't set is passed on as the literal text
+    # "${DB_PASSWORD}", and the database rejects it as a WRONG password.
+    # Resolved to "", RequiredSettingsCheck reports it as MISSING instead.
+    url: ${DB_URL:}
+    username: ${DB_USER:}
+    password: ${DB_PASSWORD:}
   jpa:
     hibernate:
+      # Creates and updates tables to match the entities. No migrations yet
+      # (decision 25 recreates the dev database instead); a production
+      # database would need Flyway or Liquibase before it holds data that
+      # matters.
       ddl-auto: update
     open-in-view: false
 
 app:
   jwt:
-    # Read from the JWT_SECRET environment variable. The default after the
-    # colon is for local development only; any real deployment sets
-    # JWT_SECRET. It must be at least 32 characters, or JwtService refuses
-    # to start.
-    secret: ${JWT_SECRET:dev-only-secret-change-me-at-least-32-chars}
+    # The key that signs every token. Anyone who knows it can sign a token
+    # for any user with any role, so it comes only from JWT_SECRET.
+    #
+    # The empty default after the colon is deliberate, and isn't a usable
+    # default. With a bare ${JWT_SECRET}, a missing variable stops the app
+    # inside Spring with "Could not resolve placeholder", which doesn't say
+    # what to do. With ${JWT_SECRET:}, it resolves to "", and JwtService
+    # refuses that at startup with one sentence naming the variable and the
+    # fix (decision 68). Same for a secret shorter than 32 bytes.
+    secret: ${JWT_SECRET:}
     # How long a token from login stays valid. After that the client logs in
     # again; there is no refresh token.
     expiry-minutes: 60

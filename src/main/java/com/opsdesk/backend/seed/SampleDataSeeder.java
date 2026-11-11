@@ -7,6 +7,7 @@ import java.util.stream.Collectors;
 
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.context.annotation.Profile;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 
@@ -40,7 +41,21 @@ import com.opsdesk.backend.user.Role;
 // restarting against an existing database adds nothing. Seeding each table
 // separately (rather than "only if everything is empty") means a database that
 // already has some of the data gets the rest filled in, not skipped.
+//
+// ONLY under the dev and test profiles (NOTES.md, decision 69). Without a
+// profile, or under prod, this class doesn't exist, and a new database starts
+// with no users. That's required, not tidy: the seeded users include an ADMIN
+// whose password (below) is published in the README, so seeding a production
+// database would hand an admin account to anyone who has read it. Promoting
+// the first real admin with SQL, as the README describes, only means
+// something when no such account already exists.
+//
+// "test" is listed because the test suite is built on decision 27's rows:
+// several test classes sign in as the seeded users. Setting
+// SPRING_PROFILES_ACTIVE=test on a production jar would seed it; that's a
+// deliberate act, not something a forgotten setting can do.
 @Component
+@Profile({"dev", "test"})
 public class SampleDataSeeder implements ApplicationRunner {
 
     // DEVELOPMENT ONLY. The password of every seeded user, so anyone running
