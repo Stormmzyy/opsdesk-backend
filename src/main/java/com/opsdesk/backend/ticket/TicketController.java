@@ -1,12 +1,12 @@
 package com.opsdesk.backend.ticket;
 
 import java.util.ArrayList;
-import org.springdoc.core.annotations.ParameterObject;
 import java.util.List;
 import java.util.Map;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springdoc.core.annotations.ParameterObject;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -30,6 +30,9 @@ import org.springframework.web.context.request.WebRequest;
 
 import com.opsdesk.backend.user.AppUser;
 
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import jakarta.validation.Valid;
 
 // @RestController does two jobs:
@@ -53,6 +56,13 @@ import jakarta.validation.Valid;
 public class TicketController {
 
     private static final Logger log = LoggerFactory.getLogger(TicketController.class);
+
+    // Swagger's description of GET /tickets' 200. OpenAPI can list the two
+    // shapes (oneOf) but can't say which one applies when, so this says it.
+    private static final String LIST_ANSWER = "With no query parameter: a plain array of every ticket you may "
+            + "see, by id. With any query parameter, even ?page=1: one page, in the envelope "
+            + "(items, page, size, totalItems, totalPages). See API_CONTRACT.md, "
+            + "\"Filtering, sorting and pagination\".";
 
     private final TicketService ticketService;
 
@@ -121,6 +131,8 @@ public class TicketController {
     // Both shapes contain only the tickets the caller may see: a USER's list
     // is her own tickets, and her page's totals count only those.
     @GetMapping
+    @ApiResponse(responseCode = "200", description = LIST_ANSWER,
+            content = @Content(schema = @Schema(oneOf = {TicketResponse[].class, TicketPage.class})))
     public Object listTickets(@Valid @ParameterObject @ModelAttribute TicketListParams params,
                               @AuthenticationPrincipal AppUser actor) {
         if (!params.anySent()) {

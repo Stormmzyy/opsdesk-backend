@@ -148,6 +148,11 @@ springdoc:
     enabled: false
   swagger-ui:
     enabled: false
+  # What the responses are documented as. The controllers don't declare
+  # "produces", so springdoc would say */*; every response this API sends is
+  # JSON (the contract's Conventions). Only the document changes: the server's
+  # actual Content-Type was already application/json.
+  default-produces-media-type: application/json
 
 # Logging (decision 72). These are production's levels, as everything in this
 # file is: INFO for this application (refusals at WARN, normal events at INFO,

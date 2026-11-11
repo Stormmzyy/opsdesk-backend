@@ -1,5 +1,7 @@
 package com.opsdesk.backend.user;
 
+import io.swagger.v3.oas.annotations.media.Schema;
+
 // The contract's User object, in the contract's field order:
 //   { "id", "name", "username", "email", "role", "phone",
 //     "address": { "street", "suite", "city", "zipcode" },
@@ -30,8 +32,12 @@ public record UserResponse(
         String username,
         String email,
         Role role,
+        // Deprecated in the contract, so marked deprecated in Swagger too.
+        @Schema(deprecated = true)
         String phone,
+        @Schema(deprecated = true)
         Address address,
+        @Schema(deprecated = true)
         Company company) {
 
     public record Address(String street, String suite, String city, String zipcode) {
