@@ -59,10 +59,23 @@ spring:
         logServerErrorDetail: false
   jpa:
     hibernate:
-      # Creates and updates tables to match the entities. No migrations yet
-      # (decision 25 recreates the dev database instead); a production
-      # database would need Flyway or Liquibase before it holds data that
-      # matters.
+      # Creates and updates tables to match the entities, in EVERY profile
+      # (application-prod.yml doesn't override it). So the first start against
+      # an empty database, such as docker compose's new volume, creates the
+      # tables itself. With "validate" or "none" that first start would stop
+      # on a missing table, which looks like a configuration mistake.
+      #
+      # Acceptable here, and only here: OpsDesk has no migration tool yet, and
+      # every database it runs against can be recreated (decision 25). What
+      # "update" can't do: it only ADDS tables and columns. It never drops or
+      # renames one, never changes a column's type, and fails to add a NOT
+      # NULL column to a table that already has rows. Whatever it can't do is
+      # silently left as it was.
+      #
+      # In a real deployment: versioned migrations with Flyway (or Liquibase),
+      # run at startup before the app takes requests, and this set to
+      # "validate", so a schema that doesn't match the entities stops the
+      # start instead of being patched.
       ddl-auto: update
     open-in-view: false
   mvc:
