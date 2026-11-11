@@ -58,6 +58,18 @@
 			<artifactId>spring-boot-starter-actuator</artifactId>
 		</dependency>
 
+		<!-- Swagger: an OpenAPI document generated from the controllers at
+		     /v3/api-docs, and the Swagger UI page that draws it. Not managed by
+		     Boot's parent, so the version is pinned here. springdoc 3.x is the
+		     line for Spring Boot 4 (springdoc.org's table: Boot 4.1.x with
+		     springdoc 3.1.x to 3.2.x). Switched on only under the dev profile
+		     (NOTES.md, decision 74): see application.yml and SecurityConfig. -->
+		<dependency>
+			<groupId>org.springdoc</groupId>
+			<artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+			<version>3.2.0</version>
+		</dependency>
+
 		<!-- JWT: the API is all the code compiles against; the implementation and its
 		     Jackson-based JSON support are only needed at runtime, as the jjwt README says. -->
 		<dependency>

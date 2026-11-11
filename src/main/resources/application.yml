@@ -137,6 +137,18 @@ management:
       show-details: never
       show-components: never
 
+# Swagger: OFF here, so off in production and whenever no profile is set
+# (decision 74), and switched on only in application-dev.yml. A live
+# /v3/api-docs hands an anonymous caller the full map of this server's paths,
+# methods and parameters, which is exactly what decision 24's uniform 401 is
+# there to withhold. Off, springdoc registers neither path, and SecurityConfig
+# doesn't permit them, so both answer 401 without a token like any other path.
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
 # Logging (decision 72). These are production's levels, as everything in this
 # file is: INFO for this application (refusals at WARN, normal events at INFO,
 # expired tokens at DEBUG and so not shown), and Spring's own defaults for the
