@@ -48,3 +48,43 @@ jobs:
       # -B: batch mode, without the progress output meant for a terminal.
       - name: Build and test
         run: ./mvnw -B verify
+
+  # Builds the Docker image, so a broken Dockerfile or .dockerignore turns CI
+  # red instead of waiting for someone to run compose by hand. A separate job
+  # runs in parallel with "verify", so a slow image build never holds up the
+  # test result; it's its own status check, "image".
+  #
+  # NOT COVERED, and only checked by hand (opsdesk-system PR #1 records how):
+  # nothing here runs docker compose, so the three services starting
+  # together, the database healthcheck and depends_on, the backend's
+  # healthcheck, and the data surviving in the volume are not tested by CI.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The Dockerfile builds the JAR itself, on JDK 21, so this job needs no
+      # setup-java. It never pushes the image anywhere.
+      - name: Build the Docker image
+        run: docker build -t opsdesk-backend:ci .
+
+      # A build only proves the image can be assembled: it never starts the
+      # JAR, so a wrong ENTRYPOINT would still build. This starts it with NO
+      # settings, which needs no database: it must exit non-zero with the
+      # report naming DB_URL (decision 68). That proves Java runs, the JAR
+      # loads, Spring starts, and the image refuses to run unconfigured.
+      - name: Start the image without settings, and expect it to refuse
+        run: |
+          set +e
+          output=$(docker run --rm opsdesk-backend:ci 2>&1)
+          status=$?
+          set -e
+          echo "$output" | tail -n 8
+          if [ "$status" -eq 0 ]; then
+            echo "::error::The image started with no settings. It must refuse."
+            exit 1
+          fi
+          if ! echo "$output" | grep -q "DB_URL is not set"; then
+            echo "::error::The image failed, but not with the missing-setting report naming DB_URL."
+            exit 1
+          fi
