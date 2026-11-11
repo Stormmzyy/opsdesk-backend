@@ -1,0 +1,50 @@
+# Continuous integration: builds the backend and runs every test, on a clean
+# Linux machine, for each push to main and each pull request.
+#
+# What a clean machine catches that this laptop can't: a file that exists
+# here but was never committed, an environment variable only set here, and
+# anything that only works on Windows.
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only: this workflow only checks out the code and builds it.
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request cancels the run still going
+# for the older one, since only the newest result matters.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The job's name is the status check's name ("verify"). Branch protection
+  # will refer to it by that name, so keep it stable.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # JDK 21: pom.xml's enforcer rule refuses to build on anything older.
+      # cache: maven keeps ~/.m2 between runs, keyed on pom.xml, so the
+      # dependencies are downloaded again only when pom.xml changes.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # verify compiles, runs every test and packages the JAR.
+      #
+      # No database service here, and none is needed: the tests run against
+      # an in-memory H2 database under the test profile (decision 62, Week 7
+      # Friday), so CI needs no PostgreSQL, no Docker and no secrets. The
+      # PostgreSQL-only behaviour is checked by the walk, by hand.
+      #
+      # -B: batch mode, without the progress output meant for a terminal.
+      - name: Build and test
+        run: ./mvnw -B verify
